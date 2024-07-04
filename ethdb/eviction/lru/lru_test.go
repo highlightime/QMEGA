@@ -18,6 +18,10 @@ func TestLRU(t *testing.T) {
 		t.Error("Error")
 	}
 
+	if l.Push([]byte("test3")) {
+		t.Error("Error")
+	}
+
 	if l.Delete([]byte("test4")) {
 		t.Error("Error")
 	}

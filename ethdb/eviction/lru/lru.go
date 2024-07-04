@@ -2,7 +2,6 @@ package lru
 
 import (
 	"container/list"
-	"fmt"
 )
 
 type Eviction struct {
@@ -56,10 +55,14 @@ func (e *Eviction) Pop() ([]byte, bool) {
 }
 
 // Add new key to policy and return true
+// return false if key already exists
 func (e *Eviction) Push(key []byte) bool {
 	strKey := string(key)
+	val := e.elemmap[strKey]
+	if val != nil {
+		return false
+	}
 	elem := e.lruList.PushBack(strKey)
-	fmt.Print(strKey, " ", elem)
 	e.elemmap[strKey] = elem
 	return true
 
