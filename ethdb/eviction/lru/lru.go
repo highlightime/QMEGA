@@ -17,7 +17,7 @@ func New() *Eviction {
 }
 
 func (e *Eviction) SelectVictim() ([]byte, bool) {
-	elem := e.lruList.Back()
+	elem := e.lruList.Front()
 	if elem == nil {
 		return nil, false
 	}
@@ -36,7 +36,7 @@ func (e *Eviction) Access(key []byte) bool {
 
 }
 func (e *Eviction) Pop() ([]byte, bool) {
-	elem := e.lruList.Back()
+	elem := e.lruList.Front()
 	if elem == nil {
 		return nil, false
 	}

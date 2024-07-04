@@ -29,7 +29,7 @@ func TestLRU(t *testing.T) {
 	if !success {
 		t.Error("Error")
 	}
-	if string(key) != "test3" {
+	if string(key) != "test1" {
 		t.Error("Error")
 	}
 	if !l.Access([]byte("test1")) {
@@ -44,24 +44,24 @@ func TestLRU(t *testing.T) {
 	if !success {
 		t.Error("Error")
 	}
-	if string(key) != "test1" {
+	if string(key) != "test3" {
 		t.Error("Error")
 	}
-	key, success = l.Pop()
-	if !success {
-		t.Error("Error")
-	}
-
-	if string(key) != "test1" {
-		t.Error("Error")
-	}
-
 	key, success = l.Pop()
 	if !success {
 		t.Error("Error")
 	}
 
 	if string(key) != "test3" {
+		t.Error("Error")
+	}
+
+	key, success = l.Pop()
+	if !success {
+		t.Error("Error")
+	}
+
+	if string(key) != "test1" {
 		t.Error("Error")
 	}
 
