@@ -62,7 +62,8 @@ const path = "/mnt_for_block_chain"
 // Apart from basic data storage functionality it also supports batch writes and
 // iterating over the keyspace in binary-alphabetical order.
 type Database struct {
-	fn string     // filename for reporting
+	hotFn string     // filename for reporting
+	coldFn string     // filename for reporting
 	hotDb *pebble.DB // Underlying pebble storage engine
 	coldDb *pebble.DB
 
@@ -206,7 +207,8 @@ func New(file1, file2 string, cache int, handles int, namespace string, readonly
 		memTableSize = maxMemTableSize - 1
 	}
 	db := &Database{
-		fn:           file1,
+		hotFn:           file1,
+		coldFn:           file2,
 		log:          logger,
 		quitChan:     make(chan chan error),
 		writeOptions: &pebble.WriteOptions{Sync: !ephemeral},
@@ -405,25 +407,53 @@ func (d *Database) Delete(key []byte) error {
 	if d.closed {
 		return pebble.ErrClosed
 	}
-	// if d.hotDb.Delete(key, nil){
-	// 	return d.coldDb.Delete(key, nil)
-	// }
-	return d.hotDb.Delete(key, nil)
+	if err := d.hotDb.Delete(key, d.writeOptions); err != nil {
+		return err
+	}
+	if err := d.coldDb.Delete(key, d.writeOptions); err != nil {
+		return err
+	}
+	return nil
 }
+
 
 // NewBatch creates a write-only key-value store that buffers changes to its host
 // database until a final write is called.
-func (d *Database) NewBatch() ethdb.Batch {
+// func (d *Database) NewBatch() ethdb.Batch {
+// 	return &batch{
+// 		b:  d.hotDb.NewBatch(),
+// 		db: d,
+// 	}
+// }
+func (d *Database) NewBatchHot() ethdb.Batch {
 	return &batch{
 		b:  d.hotDb.NewBatch(),
 		db: d,
 	}
 }
+func (d *Database) NewBatchCold() ethdb.Batch {
+	return &batch{
+		b:  d.coldDb.NewBatch(),
+		db: d,
+	}
+}
 
 // NewBatchWithSize creates a write-only database batch with pre-allocated buffer.
-func (d *Database) NewBatchWithSize(size int) ethdb.Batch {
+// func (d *Database) NewBatchWithSize(size int) ethdb.Batch {
+// 	return &batch{
+// 		b:  d.hotDb.NewBatchWithSize(size),
+// 		db: d,
+// 	}
+// }
+func (d *Database) NewBatchWithSizeHot(size int) ethdb.Batch {
 	return &batch{
 		b:  d.hotDb.NewBatchWithSize(size),
+		db: d,
+	}
+}
+func (d *Database) NewBatchWithSizeCold(size int) ethdb.Batch {
+	return &batch{
+		b:  d.coldDb.NewBatchWithSize(size),
 		db: d,
 	}
 }
@@ -438,8 +468,18 @@ type snapshot struct {
 // happened on the database.
 // Note don't forget to release the snapshot once it's used up, otherwise
 // the stale data will never be cleaned up by the underlying compactor.
-func (d *Database) NewSnapshot() (ethdb.Snapshot, error) {
+// func (d *Database) NewSnapshot() (ethdb.Snapshot, error) {
+// 	snap := d.hotDb.NewSnapshot()
+// 	return &snapshot{db: snap}, nil
+// }
+
+func (d *Database) NewSnapshotHot() (ethdb.Snapshot, error) {
 	snap := d.hotDb.NewSnapshot()
+	return &snapshot{db: snap}, nil
+}
+
+func (d *Database) NewSnapshotCold() (ethdb.Snapshot, error) {
+	snap := d.coldDb.NewSnapshot()
 	return &snapshot{db: snap}, nil
 }
 
@@ -525,8 +565,14 @@ func (d *Database) Compact(start []byte, limit []byte) error {
 }
 
 // Path returns the path to the database directory.
-func (d *Database) Path() string {
-	return d.fn
+// func (d *Database) Path() string {
+// 	return d.fn
+// }
+func (d *Database) PathHot() string {
+	return d.hotFn
+}
+func (d *Database) PathCold() string {
+	return d.coldFn
 }
 
 // meter periodically retrieves internal pebble counters and reports them to
@@ -720,8 +766,26 @@ type pebbleIterator struct {
 // NewIterator creates a binary-alphabetical iterator over a subset
 // of database content with a particular key prefix, starting at a particular
 // initial key (or after, if it does not exist).
-func (d *Database) NewIterator(prefix []byte, start []byte) ethdb.Iterator {
+// func (d *Database) NewIterator(prefix []byte, start []byte) ethdb.Iterator {
+// 	iter, _ := d.hotDb.NewIter(&pebble.IterOptions{
+// 		LowerBound: append(prefix, start...),
+// 		UpperBound: upperBound(prefix),
+// 	})
+// 	iter.First()
+// 	return &pebbleIterator{iter: iter, moved: true, released: false}
+// }
+
+func (d *Database) NewIteratorHot(prefix []byte, start []byte) ethdb.Iterator {
 	iter, _ := d.hotDb.NewIter(&pebble.IterOptions{
+		LowerBound: append(prefix, start...),
+		UpperBound: upperBound(prefix),
+	})
+	iter.First()
+	return &pebbleIterator{iter: iter, moved: true, released: false}
+}
+
+func (d *Database) NewIteratorCold(prefix []byte, start []byte) ethdb.Iterator {
+	iter, _ := d.coldDb.NewIter(&pebble.IterOptions{
 		LowerBound: append(prefix, start...),
 		UpperBound: upperBound(prefix),
 	})
