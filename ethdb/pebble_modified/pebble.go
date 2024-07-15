@@ -419,48 +419,29 @@ func (d *Database) Delete(key []byte) error {
 
 // NewBatch creates a write-only key-value store that buffers changes to its host
 // database until a final write is called.
-// func (d *Database) NewBatch() ethdb.Batch {
-// 	return &batch{
-// 		b:  d.hotDb.NewBatch(),
-// 		db: d,
-// 	}
-// }
-func (d *Database) NewBatchHot() ethdb.Batch {
+func (d *Database) NewBatch() ethdb.Batch {
 	return &batch{
-		b:  d.hotDb.NewBatch(),
-		db: d,
-	}
-}
-func (d *Database) NewBatchCold() ethdb.Batch {
-	return &batch{
-		b:  d.coldDb.NewBatch(),
+		bHot:  d.hotDb.NewBatch(),
+		bCold: d.coldDb.NewBatch(),
 		db: d,
 	}
 }
 
+
 // NewBatchWithSize creates a write-only database batch with pre-allocated buffer.
-// func (d *Database) NewBatchWithSize(size int) ethdb.Batch {
-// 	return &batch{
-// 		b:  d.hotDb.NewBatchWithSize(size),
-// 		db: d,
-// 	}
-// }
-func (d *Database) NewBatchWithSizeHot(size int) ethdb.Batch {
+func (d *Database) NewBatchWithSize(size int) ethdb.Batch {
 	return &batch{
-		b:  d.hotDb.NewBatchWithSize(size),
+		bHot:  d.hotDb.NewBatchWithSize(size),
+		bCold:  d.coldDb.NewBatchWithSize(size),
 		db: d,
 	}
 }
-func (d *Database) NewBatchWithSizeCold(size int) ethdb.Batch {
-	return &batch{
-		b:  d.coldDb.NewBatchWithSize(size),
-		db: d,
-	}
-}
+
 
 // snapshot wraps a pebble snapshot for implementing the Snapshot interface.
 type snapshot struct {
-	db *pebble.Snapshot
+	dbHot *pebble.Snapshot
+	dbCold *pebble.Snapshot
 }
 
 // NewSnapshot creates a database snapshot based on the current state.
@@ -468,55 +449,66 @@ type snapshot struct {
 // happened on the database.
 // Note don't forget to release the snapshot once it's used up, otherwise
 // the stale data will never be cleaned up by the underlying compactor.
-// func (d *Database) NewSnapshot() (ethdb.Snapshot, error) {
-// 	snap := d.hotDb.NewSnapshot()
-// 	return &snapshot{db: snap}, nil
-// }
-
-func (d *Database) NewSnapshotHot() (ethdb.Snapshot, error) {
-	snap := d.hotDb.NewSnapshot()
-	return &snapshot{db: snap}, nil
+func (d *Database) NewSnapshot() (ethdb.Snapshot, error) {
+	snapHot := d.hotDb.NewSnapshot()
+	snapCold := d.coldDb.NewSnapshot()
+	return &snapshot{dbHot: snapHot, dbCold: snapCold}, nil
 }
-
-func (d *Database) NewSnapshotCold() (ethdb.Snapshot, error) {
-	snap := d.coldDb.NewSnapshot()
-	return &snapshot{db: snap}, nil
-}
-
-// Has retrieves if a key is present in the snapshot backing by a key-value
-// data store.
+// Has checks if the given key is present in either the hot or cold snapshot.
 func (snap *snapshot) Has(key []byte) (bool, error) {
-	// fmt.Printf("sh:k: %X\n", key)
-	_, closer, err := snap.db.Get(key)
+	// Check in hot snapshot
+	if has, err := snap.hasInSnapshot(snap.dbHot, key); err != nil || has {
+		return has, err
+	}
+
+	// Check in cold snapshot
+	return snap.hasInSnapshot(snap.dbCold, key)
+}
+
+// hasInSnapshot is a helper function to check if a key exists in a given snapshot.
+func (snap *snapshot) hasInSnapshot(snapDb *pebble.Snapshot, key []byte) (bool, error) {
+	_, closer, err := snapDb.Get(key)
 	if err != nil {
 		if err != pebble.ErrNotFound {
 			return false, err
-		} else {
-			return false, nil
 		}
+		return false, nil
 	}
 	closer.Close()
 	return true, nil
 }
 
-// Get retrieves the given key if it's present in the snapshot backing by
-// key-value data store.
+// Get retrieves the given key if it's present in either the hot or cold snapshot.
 func (snap *snapshot) Get(key []byte) ([]byte, error) {
-	// fmt.Printf("sh:g: %X\n", key)
-	dat, closer, err := snap.db.Get(key)
+	// Try to get from hot snapshot
+	if data, err := snap.getFromSnapshot(snap.dbHot, key); err == nil {
+		return data, nil
+	} else if err != pebble.ErrNotFound {
+		return nil, err
+	}
+
+	// Try to get from cold snapshot
+	return snap.getFromSnapshot(snap.dbCold, key)
+}
+
+// getFromSnapshot is a helper function to get a key from a given snapshot.
+func (snap *snapshot) getFromSnapshot(snapDb *pebble.Snapshot, key []byte) ([]byte, error) {
+	dat, closer, err := snapDb.Get(key)
 	if err != nil {
 		return nil, err
 	}
+	defer closer.Close()
+
 	ret := make([]byte, len(dat))
 	copy(ret, dat)
-	closer.Close()
 	return ret, nil
 }
 
 // Release releases associated resources. Release should always succeed and can
 // be called multiple times without causing error.
 func (snap *snapshot) Release() {
-	snap.db.Close()
+	snap.dbHot.Close()
+	snap.dbCold.Close()
 }
 
 // upperBound returns the upper bound for the given prefix
@@ -561,18 +553,22 @@ func (d *Database) Compact(start []byte, limit []byte) error {
 	if limit == nil {
 		limit = bytes.Repeat([]byte{0xff}, 32)
 	}
-	return d.hotDb.Compact(start, limit, true) // Parallelization is preferred
+	// Parallelization is preferred
+	// Compact both hot and cold databases
+	if err := d.hotDb.Compact(start, limit, true); err != nil {
+		return err
+	}
+
+	if err := d.coldDb.Compact(start, limit, true); err != nil {
+		return err
+	}
+
+	return nil
 }
 
 // Path returns the path to the database directory.
-// func (d *Database) Path() string {
-// 	return d.fn
-// }
-func (d *Database) PathHot() string {
+func (d *Database) Path() string {
 	return d.hotFn
-}
-func (d *Database) PathCold() string {
-	return d.coldFn
 }
 
 // meter periodically retrieves internal pebble counters and reports them to
@@ -688,7 +684,8 @@ func (d *Database) meter(refresh time.Duration, namespace string) {
 // batch is a write-only batch that commits changes to its host database
 // when Write is called. A batch cannot be used concurrently.
 type batch struct {
-	b    *pebble.Batch
+	bHot    *pebble.Batch
+	bCold    *pebble.Batch
 	db   *Database
 	size int
 }
@@ -698,7 +695,12 @@ func (b *batch) Put(key, value []byte) error {
 	//linas
 	// fmt.Printf("bp:k: %X v: %d\n", key, int(unsafe.Sizeof(value)))
 	// debug.PrintStack()
-	b.b.Set(key, value, nil)
+	// Determine whether to use hot or cold batch based on the key
+	if shouldUseHot(key) {
+		b.bHot.Set(key, value, nil)
+	} else {
+		b.bCold.Set(key, value, nil)
+	}
 	b.size += len(key) + len(value)
 	return nil
 }
@@ -706,7 +708,11 @@ func (b *batch) Put(key, value []byte) error {
 // Delete inserts the key removal into the batch for later committing.
 func (b *batch) Delete(key []byte) error {
 	// fmt.Printf("bd:k: %X\n", key)
-	b.b.Delete(key, nil)
+	if shouldUseHot(key) {
+		b.bHot.Delete(key, nil)
+	} else {
+		b.bCold.Delete(key, nil)
+	}
 	b.size += len(key)
 	return nil
 }
@@ -723,18 +729,66 @@ func (b *batch) Write() error {
 	if b.db.closed {
 		return pebble.ErrClosed
 	}
-	return b.b.Commit(b.db.writeOptions)
+if err := b.bHot.Commit(b.db.writeOptions); err != nil {
+		return err
+	}
+	if err := b.bCold.Commit(b.db.writeOptions); err != nil {
+		return err
+	}
+	return nil
+}
+
+// shouldUseHot is a placeholder function that determines whether to use hot or cold batch based on the key.
+func shouldUseHot(key []byte) bool {
+
+	return true 
 }
 
 // Reset resets the batch for reuse.
 func (b *batch) Reset() {
-	b.b.Reset()
+	b.bHot.Reset()
+	b.bCold.Reset()
 	b.size = 0
 }
 
 // Replay replays the batch contents.
+// func (b *batch) Replay(w ethdb.KeyValueWriter) error {
+// 	reader := b.b.Reader()
+// 	for {
+// 		kind, k, v, ok, err := reader.Next()
+// 		if !ok || err != nil {
+// 			break
+// 		}
+// 		// The (k,v) slices might be overwritten if the batch is reset/reused,
+// 		// and the receiver should copy them if they are to be retained long-term.
+// 		if kind == pebble.InternalKeyKindSet {
+// 			w.Put(k, v)
+// 		} else if kind == pebble.InternalKeyKindDelete {
+// 			w.Delete(k)
+// 		} else {
+// 			return fmt.Errorf("unhandled operation, keytype: %v", kind)
+// 		}
+// 	}
+// 	return nil
+// }
+
 func (b *batch) Replay(w ethdb.KeyValueWriter) error {
-	reader := b.b.Reader()
+	// Replay hot batch
+	if err := replayBatch(b.bHot, w); err != nil {
+		return err
+	}
+
+	// Replay cold batch
+	if err := replayBatch(b.bCold, w); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// replayBatch replays the operations in the given batch to the KeyValueWriter.
+func replayBatch(batch *pebble.Batch, w ethdb.KeyValueWriter) error {
+	reader := batch.Reader()
 	for {
 		kind, k, v, ok, err := reader.Next()
 		if !ok || err != nil {
@@ -758,80 +812,97 @@ func (b *batch) Replay(w ethdb.KeyValueWriter) error {
 //
 // The pebble iterator is not thread-safe.
 type pebbleIterator struct {
-	iter     *pebble.Iterator
+	iterHot     *pebble.Iterator
+	iterCold     *pebble.Iterator
 	moved    bool
 	released bool
+	lastIterHot bool
 }
 
 // NewIterator creates a binary-alphabetical iterator over a subset
 // of database content with a particular key prefix, starting at a particular
 // initial key (or after, if it does not exist).
-// func (d *Database) NewIterator(prefix []byte, start []byte) ethdb.Iterator {
-// 	iter, _ := d.hotDb.NewIter(&pebble.IterOptions{
-// 		LowerBound: append(prefix, start...),
-// 		UpperBound: upperBound(prefix),
-// 	})
-// 	iter.First()
-// 	return &pebbleIterator{iter: iter, moved: true, released: false}
-// }
-
-func (d *Database) NewIteratorHot(prefix []byte, start []byte) ethdb.Iterator {
-	iter, _ := d.hotDb.NewIter(&pebble.IterOptions{
+func (d *Database) NewIterator(prefix []byte, start []byte) ethdb.Iterator {
+	iterHot, _ := d.hotDb.NewIter(&pebble.IterOptions{
 		LowerBound: append(prefix, start...),
 		UpperBound: upperBound(prefix),
 	})
-	iter.First()
-	return &pebbleIterator{iter: iter, moved: true, released: false}
-}
-
-func (d *Database) NewIteratorCold(prefix []byte, start []byte) ethdb.Iterator {
-	iter, _ := d.coldDb.NewIter(&pebble.IterOptions{
+	iterCold, _ := d.coldDb.NewIter(&pebble.IterOptions{
 		LowerBound: append(prefix, start...),
 		UpperBound: upperBound(prefix),
 	})
-	iter.First()
-	return &pebbleIterator{iter: iter, moved: true, released: false}
+	iterHot.First()
+	iterCold.First()
+	return &pebbleIterator{iterHot: iterHot, iterCold: iterCold, moved: true, released: false}
 }
 
-// Next moves the iterator to the next key/value pair. It returns whether the
-// iterator is exhausted.
 func (iter *pebbleIterator) Next() bool {
-	if iter.moved {
-		iter.moved = false
-		return iter.iter.Valid()
+	if iter.released {
+		return false
 	}
-	// temp=iter.iter.Next()
-	// if temp{
-	// 	fmt.Printf("ni: %X\n", temp.Key())
-	// }
-	return iter.iter.Next()
+
+	// Move the iterator with the smaller key
+	if iter.iterHot.Valid() && iter.iterCold.Valid() {
+		if bytes.Compare(iter.iterHot.Key(), iter.iterCold.Key()) <= 0 {
+			iter.iterHot.Next()
+			iter.lastIterHot = true
+		} else {
+			iter.iterCold.Next()
+			iter.lastIterHot = false
+		}
+	} else if iter.iterHot.Valid() {
+		iter.iterHot.Next()
+		iter.lastIterHot = true
+	} else if iter.iterCold.Valid() {
+		iter.iterCold.Next()
+		iter.lastIterHot = false
+	}
+
+	// Return true if either iterator is still valid
+	return iter.iterHot.Valid() || iter.iterCold.Valid()
 }
 
 // Error returns any accumulated error. Exhausting all the key/value pairs
 // is not considered to be an error.
 func (iter *pebbleIterator) Error() error {
-	return iter.iter.Error()
+	if err := iter.iterHot.Error(); err != nil {
+		return err
+	}
+	return iter.iterCold.Error()
 }
 
 // Key returns the key of the current key/value pair, or nil if done. The caller
 // should not modify the contents of the returned slice, and its contents may
 // change on the next call to Next.
 func (iter *pebbleIterator) Key() []byte {
-	return iter.iter.Key()
+	if iter.lastIterHot && iter.iterHot.Valid() {
+		return iter.iterHot.Key()
+	}
+	if !iter.lastIterHot && iter.iterCold.Valid() {
+		return iter.iterCold.Key()
+	}
+	return nil
 }
 
 // Value returns the value of the current key/value pair, or nil if done. The
 // caller should not modify the contents of the returned slice, and its contents
 // may change on the next call to Next.
 func (iter *pebbleIterator) Value() []byte {
-	return iter.iter.Value()
+	if iter.lastIterHot && iter.iterHot.Valid() {
+		return iter.iterHot.Value()
+	}
+	if !iter.lastIterHot && iter.iterCold.Valid() {
+		return iter.iterCold.Value()
+	}
+	return nil
 }
 
 // Release releases associated resources. Release should always succeed and can
 // be called multiple times without causing error.
 func (iter *pebbleIterator) Release() {
 	if !iter.released {
-		iter.iter.Close()
+		iter.iterHot.Close()
+		iter.iterCold.Close()
 		iter.released = true
 	}
 }
