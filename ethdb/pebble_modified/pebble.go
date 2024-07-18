@@ -708,11 +708,8 @@ func (b *batch) Put(key, value []byte) error {
 // Delete inserts the key removal into the batch for later committing.
 func (b *batch) Delete(key []byte) error {
 	// fmt.Printf("bd:k: %X\n", key)
-	if shouldUseHot(key) {
-		b.bHot.Delete(key, nil)
-	} else {
-		b.bCold.Delete(key, nil)
-	}
+	b.bHot.Delete(key, nil)
+	b.bCold.Delete(key, nil)
 	b.size += len(key)
 	return nil
 }
@@ -729,15 +726,16 @@ func (b *batch) Write() error {
 	if b.db.closed {
 		return pebble.ErrClosed
 	}
-if err := b.bHot.Commit(b.db.writeOptions); err != nil {
-		return err
-	}
-	if err := b.bCold.Commit(b.db.writeOptions); err != nil {
+	if err := b.bHot.Commit(b.db.writeOptions); err != nil {
+		fmt.Println("dbHot Batch Write Error:", err)
+		if err := b.bCold.Commit(b.db.writeOptions); err != nil {
+			fmt.Println("dbCold Batch Write Error:", err)
+			return err
+		}
 		return err
 	}
 	return nil
 }
-
 // shouldUseHot is a placeholder function that determines whether to use hot or cold batch based on the key.
 func shouldUseHot(key []byte) bool {
 
@@ -754,14 +752,12 @@ func (b *batch) Reset() {
 func (b *batch) Replay(w ethdb.KeyValueWriter) error {
 	// Replay hot batch
 	if err := replayBatch(b.bHot, w); err != nil {
+		// Replay cold batch
+		if err := replayBatch(b.bCold, w); err != nil {
+			return err
+		}
 		return err
 	}
-
-	// Replay cold batch
-	if err := replayBatch(b.bCold, w); err != nil {
-		return err
-	}
-
 	return nil
 }
 
@@ -792,10 +788,11 @@ func replayBatch(batch *pebble.Batch, w ethdb.KeyValueWriter) error {
 // The pebble iterator is not thread-safe.
 type pebbleIterator struct {
 	iterHot     *pebble.Iterator
-	iterCold     *pebble.Iterator
-	moved    bool
-	released bool
-	lastIterHot bool
+	iterCold    *pebble.Iterator
+	movedHot    bool
+	movedCold   bool
+	releasedHot bool
+	releasedCold bool
 }
 
 // NewIterator creates a binary-alphabetical iterator over a subset
@@ -812,33 +809,33 @@ func (d *Database) NewIterator(prefix []byte, start []byte) ethdb.Iterator {
 	})
 	iterHot.First()
 	iterCold.First()
-	return &pebbleIterator{iterHot: iterHot, iterCold: iterCold, moved: true, released: false}
+	return &pebbleIterator{
+		iterHot:     iterHot,
+		iterCold:    iterCold,
+		movedHot:    true,
+		movedCold:   true,
+		releasedHot: false,
+		releasedCold: false,
+	}
 }
 
 func (iter *pebbleIterator) Next() bool {
-	if iter.released {
-		return false
-	}
-
-	// Move the iterator with the smaller key
-	if iter.iterHot.Valid() && iter.iterCold.Valid() {
-		if bytes.Compare(iter.iterHot.Key(), iter.iterCold.Key()) <= 0 {
-			iter.iterHot.Next()
-			iter.lastIterHot = true
-		} else {
-			iter.iterCold.Next()
-			iter.lastIterHot = false
+	if iter.movedHot {
+		iter.movedHot = false
+		if iter.iterHot.Valid() {
+			return true
 		}
-	} else if iter.iterHot.Valid() {
-		iter.iterHot.Next()
-		iter.lastIterHot = true
-	} else if iter.iterCold.Valid() {
-		iter.iterCold.Next()
-		iter.lastIterHot = false
 	}
-
-	// Return true if either iterator is still valid
-	return iter.iterHot.Valid() || iter.iterCold.Valid()
+	if iter.movedCold {
+		iter.movedCold = false
+		if iter.iterCold.Valid() {
+			return true
+		}
+	}
+	if iter.iterHot.Next() {
+		return true
+	}
+	return iter.iterCold.Next()
 }
 
 // Error returns any accumulated error. Exhausting all the key/value pairs
@@ -854,10 +851,10 @@ func (iter *pebbleIterator) Error() error {
 // should not modify the contents of the returned slice, and its contents may
 // change on the next call to Next.
 func (iter *pebbleIterator) Key() []byte {
-	if iter.lastIterHot && iter.iterHot.Valid() {
+	if iter.iterHot.Valid() {
 		return iter.iterHot.Key()
 	}
-	if !iter.lastIterHot && iter.iterCold.Valid() {
+	if iter.iterCold.Valid() {
 		return iter.iterCold.Key()
 	}
 	return nil
@@ -867,10 +864,10 @@ func (iter *pebbleIterator) Key() []byte {
 // caller should not modify the contents of the returned slice, and its contents
 // may change on the next call to Next.
 func (iter *pebbleIterator) Value() []byte {
-	if iter.lastIterHot && iter.iterHot.Valid() {
+	if iter.iterHot.Valid() {
 		return iter.iterHot.Value()
 	}
-	if !iter.lastIterHot && iter.iterCold.Valid() {
+	if iter.iterCold.Valid() {
 		return iter.iterCold.Value()
 	}
 	return nil
@@ -879,9 +876,13 @@ func (iter *pebbleIterator) Value() []byte {
 // Release releases associated resources. Release should always succeed and can
 // be called multiple times without causing error.
 func (iter *pebbleIterator) Release() {
-	if !iter.released {
+	if !iter.releasedHot {
 		iter.iterHot.Close()
+		iter.releasedHot = true
+	}
+	if !iter.releasedCold {
 		iter.iterCold.Close()
-		iter.released = true
+		iter.releasedCold = true
 	}
 }
+
