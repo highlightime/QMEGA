@@ -55,8 +55,7 @@ const (
 )
 
 var overThresholdFlag = false
-const ssdThreshold = 1
-const path = "/mnt_for_block_chain"
+const path = "."
 
 // Database is a persistent key-value store based on the pebble storage engine.
 // Apart from basic data storage functionality it also supports batch writes and
@@ -66,6 +65,7 @@ type Database struct {
 	coldFn string     // filename for reporting
 	hotDb *pebble.DB // Underlying pebble storage engine
 	coldDb *pebble.DB
+	ssdThreshold int
 
 	compTimeMeter       metrics.Meter // Meter for measuring the total time spent in database compaction
 	compReadMeter       metrics.Meter // Meter for measuring the data read during compaction
@@ -169,7 +169,7 @@ func (l panicLogger) Fatalf(format string, args ...interface{}) {
 
 // New returns a wrapped pebble DB object. The namespace is the prefix that the
 // metrics reporting should use for surfacing internal stats.
-func New(file1, file2 string, cache int, handles int, namespace string, readonly bool, ephemeral bool) (*Database, error) {
+func New(ssdThreshold int, file1, file2 string, cache int, handles int, namespace string, readonly bool, ephemeral bool) (*Database, error) {
 	// Ensure we have some minimal caching and file guarantees
 	if cache < minCache {
 		cache = minCache
@@ -209,6 +209,7 @@ func New(file1, file2 string, cache int, handles int, namespace string, readonly
 	db := &Database{
 		hotFn:           file1,
 		coldFn:           file2,
+		ssdThreshold:   ssdThreshold,
 		log:          logger,
 		quitChan:     make(chan chan error),
 		writeOptions: &pebble.WriteOptions{Sync: !ephemeral},
@@ -386,7 +387,7 @@ func (d *Database) Put(key []byte, value []byte) error {
 		return err
 	}
 	fmt.Printf("Total: %d bytes\nFree: %d bytes\nUsed: %d bytes\nUsage: %.2f%%\n", total, free, used, usage)
-	if usage >= ssdThreshold {
+	if usage >= float64(d.ssdThreshold) {
 		overThresholdFlag = true
 	} else {
 		overThresholdFlag = false
@@ -728,10 +729,6 @@ func (b *batch) Write() error {
 	}
 	if err := b.bHot.Commit(b.db.writeOptions); err != nil {
 		fmt.Println("dbHot Batch Write Error:", err)
-		if err := b.bCold.Commit(b.db.writeOptions); err != nil {
-			fmt.Println("dbCold Batch Write Error:", err)
-			return err
-		}
 		return err
 	}
 	return nil
@@ -752,10 +749,7 @@ func (b *batch) Reset() {
 func (b *batch) Replay(w ethdb.KeyValueWriter) error {
 	// Replay hot batch
 	if err := replayBatch(b.bHot, w); err != nil {
-		// Replay cold batch
-		if err := replayBatch(b.bCold, w); err != nil {
-			return err
-		}
+		fmt.Println("dbHot Batch Replay Error:", err)
 		return err
 	}
 	return nil
