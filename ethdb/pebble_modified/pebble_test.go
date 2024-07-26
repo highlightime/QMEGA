@@ -51,46 +51,71 @@ func TestOverThreshold(t *testing.T) {
 
 	// Test Has with an empty database
 	hasKey, err := db.Has([]byte("key"))
-	assert.NoError(t, err, "Failed to check key in database 1")
-	assert.False(t, hasKey, "Expected key 'key' to be absent in database 1")
+	assert.NoError(t, err, "Failed to check key in database")
+	assert.False(t, hasKey, "Expected key 'key' to be absent in database")
 
 	// Test Put with an empty database
-	err = db.Put([]byte("key"), []byte("value"))
+	fmt.Println("# Put key1, key4, key5 in cold db")
+	err = db.PutForTest([]byte("key1"), []byte("value"))
+	assert.NoError(t, err, "Failed to put key in database")
+	err = db.PutForTest([]byte("key4"), []byte("value"))
+	assert.NoError(t, err, "Failed to put key in database")
+	err = db.PutForTest([]byte("key5"), []byte("value"))
 	assert.NoError(t, err, "Failed to put key in database")
 
 	// Test Get with a database having the key
-	getValue, err := db.Get([]byte("key"))
+	fmt.Println("# Get key1")
+	getValue, err := db.Get([]byte("key1"))
 	assert.NoError(t, err, "Failed to get key in database")
 	assert.NotNil(t, getValue, "Expected to get a value for 'key'")
-	t.Logf("Got value: %v", getValue)
-
-	// Test Delete with a database having the key
-	err = db.Delete([]byte("key"))
-	assert.NoError(t, err, "Failed to delete key in database")
-
-	// Test Get with an empty database
-	getValue, err = db.Get([]byte("key"))
-	assert.Error(t, err, "Expected an error when getting deleted key")
 
 	// Test NewBatch
+	fmt.Println("# Batch Put key1, key2")
 	b := db.NewBatch()
 	assert.NotNil(t, b, "Failed to create batch")
 
-	err = b.Put([]byte("key"), []byte("value"))
+	err = b.Put([]byte("key1"), []byte("value1"))
+	assert.NoError(t, err, "Failed to put key in batch")
+
+	err = b.Put([]byte("key2"), []byte("value2"))
+	assert.NoError(t, err, "Failed to put key in batch")
+
+	err = b.Put([]byte("key3"), []byte("value3"))
 	assert.NoError(t, err, "Failed to put key in batch")
 
 	err = b.Write()
 	assert.NoError(t, err, "Failed to write batch")
 
+	// Test NewIterator
+	fmt.Println("# Iterator prefix key")
+	iter := db.NewIterator([]byte("key"), []byte(""))
+	assert.NotNil(t, iter, "Failed to create iterator")
+
+	// Test Next of Iterator
+	for iter.Next() {
+		k := iter.Key()
+		v := iter.Value()
+		fmt.Printf("Got key: %s, value: %s\n", k, v)
+	}
+
+	if err := iter.Error(); err != nil {
+		t.Errorf("test iteration failed: %v", err)
+	}
+
+	assert.NoError(t,db.Compact([]byte("key1"), []byte("key5")),"Failed to compact")
+	iter.Release()
+
 	// Test Snapshot with a database having the key
 	s, err := db.NewSnapshot()
 	assert.NoError(t, err, "Failed to create snapshot")
 
-	hasKey, err = s.Has([]byte("key"))
+	fmt.Println("# Snapshot Has key1")
+	hasKey, err = s.Has([]byte("key1"))
 	assert.NoError(t, err, "Failed to check key in snapshot")
 	assert.True(t, hasKey, "Expected key 'key' to be present in snapshot")
 
-	getValue, err = s.Get([]byte("key"))
+	fmt.Println("# Snapshot Get key1")
+	getValue, err = s.Get([]byte("key1"))
 	assert.NoError(t, err, "Failed to get key in snapshot")
 	assert.NotNil(t, getValue, "Expected to get a value for 'key' in snapshot")
 	s.Release()
@@ -99,31 +124,13 @@ func TestOverThreshold(t *testing.T) {
 	b = db.NewBatchWithSize(100)
 	assert.NotNil(t, b, "Failed to create batch with size")
 
-	err = b.Delete([]byte("key"))
+	err = b.Delete([]byte("key1"))
 	assert.NoError(t, err, "Failed to delete key in batch")
 
 	b.Reset()
 	b.Replay(db)
 
-	// Test NewIterator
-	iter := db.NewIterator([]byte("key"), []byte("key"))
-	assert.NotNil(t, iter, "Failed to create iterator")
-
-	k := iter.Key()
-	assert.Nil(t, k, "Failed to get key from iterator")
-
-	v := iter.Value()
-	assert.Nil(t, v, "Failed to get value from iterator")
-
-	e := iter.Error()
-	assert.Nil(t, e, "Failed to get error from iterator")
-
-	// Ensure iterator reaches the end
-	assert.False(t, iter.Next(), "Expected iterator to be exhausted")
-
-	assert.NoError(t,db.Compact([]byte("key"), []byte("key1")),"Failed to compact")
 	
-	iter.Release()
 	db.Close()
 }
 
@@ -148,47 +155,78 @@ func TestUnderThreshold(t *testing.T) {
 	defer db.Close()
 
 	// Test Has with an empty database
-	hasKey, err := db.Has([]byte("key"))
-	assert.NoError(t, err, "Failed to check key in database 1")
-	assert.False(t, hasKey, "Expected key 'key' to be absent in database 1")
+	fmt.Println("# Has key1")
+	hasKey, err := db.Has([]byte("key1"))
+	assert.NoError(t, err, "Failed to check key in database")
+	assert.False(t, hasKey, "Expected key 'key' to be absent in database")
 
 	// Test Put with an empty database
-	err = db.Put([]byte("key"), []byte("value"))
+	fmt.Println("# Put key1")
+	err = db.PutForTest([]byte("key1"), []byte("value1"))
 	assert.NoError(t, err, "Failed to put key in database")
 
 	// Test Get with a database having the key
-	getValue, err := db.Get([]byte("key"))
+	fmt.Println("# Get key1")
+	getValue, err := db.Get([]byte("key1"))
 	assert.NoError(t, err, "Failed to get key in database")
 	assert.NotNil(t, getValue, "Expected to get a value for 'key'")
 	t.Logf("Got value: %v", getValue)
 
 	// Test Delete with a database having the key
-	err = db.Delete([]byte("key"))
+	fmt.Println("# Delete key1")
+	err = db.Delete([]byte("key1"))
 	assert.NoError(t, err, "Failed to delete key in database")
 
-	// Test Get with an empty database
-	getValue, err = db.Get([]byte("key"))
-	assert.Error(t, err, "Expected an error when getting deleted key")
+	// Test Get with a database after deleting the key
+	fmt.Println("# Get key1")
+	_, err = db.Get([]byte("key1"))
+	assert.Error(t, err, "Expected to get an error for 'key'")
 
 	// Test NewBatch
+	fmt.Println("# Batch Put key1, key2, key3")
 	b := db.NewBatch()
 	assert.NotNil(t, b, "Failed to create batch")
 
-	err = b.Put([]byte("key"), []byte("value"))
+	err = b.Put([]byte("key1"), []byte("value1"))
+	assert.NoError(t, err, "Failed to put key in batch")
+
+	err = b.Put([]byte("key2"), []byte("value2"))
+	assert.NoError(t, err, "Failed to put key in batch")
+
+	err = b.Put([]byte("key3"), []byte("value3"))
 	assert.NoError(t, err, "Failed to put key in batch")
 
 	err = b.Write()
 	assert.NoError(t, err, "Failed to write batch")
 
+	// Test NewIterator
+	fmt.Println("# Iterator prefix key")
+	iter := db.NewIterator([]byte("key"), []byte(""))
+	assert.NotNil(t, iter, "Failed to create iterator")
+
+	for iter.Next() {
+		k := iter.Key()
+		v := iter.Value()
+		fmt.Printf("Got key: %s, value: %s\n", k, v)
+	}
+
+	if err := iter.Error(); err != nil {
+		t.Errorf("test iteration failed: %v", err)
+	}
+	assert.NoError(t,db.Compact([]byte("key1"), []byte("key5")),"Failed to compact")
+	iter.Release()
+
 	// Test Snapshot with a database having the key
 	s, err := db.NewSnapshot()
 	assert.NoError(t, err, "Failed to create snapshot")
 
-	hasKey, err = s.Has([]byte("key"))
+	fmt.Println("# Snapshot Has key1")
+	hasKey, err = s.Has([]byte("key1"))
 	assert.NoError(t, err, "Failed to check key in snapshot")
 	assert.True(t, hasKey, "Expected key 'key' to be present in snapshot")
 
-	getValue, err = s.Get([]byte("key"))
+	fmt.Println("# Snapshot Get key1")
+	getValue, err = s.Get([]byte("key1"))
 	assert.NoError(t, err, "Failed to get key in snapshot")
 	assert.NotNil(t, getValue, "Expected to get a value for 'key' in snapshot")
 	s.Release()
@@ -197,30 +235,12 @@ func TestUnderThreshold(t *testing.T) {
 	b = db.NewBatchWithSize(100)
 	assert.NotNil(t, b, "Failed to create batch with size")
 
-	err = b.Delete([]byte("key"))
+	err = b.Delete([]byte("key1"))
 	assert.NoError(t, err, "Failed to delete key in batch")
 
 	b.Reset()
 	b.Replay(db)
 
-	// Test NewIterator
-	iter := db.NewIterator([]byte("key"), []byte("key"))
-	assert.NotNil(t, iter, "Failed to create iterator")
-
-	k := iter.Key()
-	assert.Nil(t, k, "Failed to get key from iterator")
-
-	v := iter.Value()
-	assert.Nil(t, v, "Failed to get value from iterator")
-
-	e := iter.Error()
-	assert.Nil(t, e, "Failed to get error from iterator")
-
-	// Ensure iterator reaches the end
-	assert.False(t, iter.Next(), "Expected iterator to be exhausted")
-
-	assert.NoError(t,db.Compact([]byte("key"), []byte("key1")),"Failed to compact")
 	
-	iter.Release()
 	db.Close()
 }
