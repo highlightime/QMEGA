@@ -56,11 +56,11 @@ func TestOverThreshold(t *testing.T) {
 
 	// Test Put with an empty database
 	fmt.Println("# Put key1, key4, key5 in cold db")
-	err = db.PutForTest([]byte("key1"), []byte("value"))
+	err = db.PutForTest([]byte("key1"), []byte("value1"))
 	assert.NoError(t, err, "Failed to put key in database")
-	err = db.PutForTest([]byte("key4"), []byte("value"))
+	err = db.PutForTest([]byte("key4"), []byte("value4"))
 	assert.NoError(t, err, "Failed to put key in database")
-	err = db.PutForTest([]byte("key5"), []byte("value"))
+	err = db.PutForTest([]byte("key6"), []byte("value6"))
 	assert.NoError(t, err, "Failed to put key in database")
 
 	// Test Get with a database having the key
@@ -68,13 +68,17 @@ func TestOverThreshold(t *testing.T) {
 	getValue, err := db.Get([]byte("key1"))
 	assert.NoError(t, err, "Failed to get key in database")
 	assert.NotNil(t, getValue, "Expected to get a value for 'key'")
+	assert.Equal(t, []byte("value1"), getValue, "Expected value 'value1' for 'key1' in snapshot")
 
 	// Test NewBatch
-	fmt.Println("# Batch Put key1, key2")
+	fmt.Println("# Batch Put key10, key99, key2, key3 in hot db")
 	b := db.NewBatch()
 	assert.NotNil(t, b, "Failed to create batch")
 
-	err = b.Put([]byte("key1"), []byte("value1"))
+	err = b.Put([]byte("key10"), []byte("value10"))
+	assert.NoError(t, err, "Failed to put key in batch")
+
+	err = b.Put([]byte("key99"), []byte("value99"))
 	assert.NoError(t, err, "Failed to put key in batch")
 
 	err = b.Put([]byte("key2"), []byte("value2"))
@@ -92,10 +96,13 @@ func TestOverThreshold(t *testing.T) {
 	assert.NotNil(t, iter, "Failed to create iterator")
 
 	// Test Next of Iterator
+	i := 1
 	for iter.Next() {
 		k := iter.Key()
 		v := iter.Value()
+		fmt.Println("i: ", i)
 		fmt.Printf("Got key: %s, value: %s\n", k, v)
+		i++
 	}
 
 	if err := iter.Error(); err != nil {
@@ -118,6 +125,7 @@ func TestOverThreshold(t *testing.T) {
 	getValue, err = s.Get([]byte("key1"))
 	assert.NoError(t, err, "Failed to get key in snapshot")
 	assert.NotNil(t, getValue, "Expected to get a value for 'key' in snapshot")
+	assert.Equal(t, []byte("value1"), getValue, "Expected value 'value1' for 'key1' in snapshot")
 	s.Release()
 
 	// Test NewBatchWithSize
@@ -154,6 +162,11 @@ func TestUnderThreshold(t *testing.T) {
 	assert.NoError(t, err, "Failed to open databases")
 	defer db.Close()
 
+	// Test Delete with an empty database
+	fmt.Println("# Delete key1")
+	err = db.Delete([]byte("key1"))
+	assert.Nil(t, err, "Not failed to delete key in database")
+
 	// Test Has with an empty database
 	fmt.Println("# Has key1")
 	hasKey, err := db.Has([]byte("key1"))
@@ -170,7 +183,8 @@ func TestUnderThreshold(t *testing.T) {
 	getValue, err := db.Get([]byte("key1"))
 	assert.NoError(t, err, "Failed to get key in database")
 	assert.NotNil(t, getValue, "Expected to get a value for 'key'")
-	t.Logf("Got value: %v", getValue)
+	assert.Equal(t, []byte("value1"), getValue, "Expected value 'value1' for 'key1' in snapshot")
+	// t.Logf("Got value: %v", getValue)
 
 	// Test Delete with a database having the key
 	fmt.Println("# Delete key1")
@@ -183,7 +197,7 @@ func TestUnderThreshold(t *testing.T) {
 	assert.Error(t, err, "Expected to get an error for 'key'")
 
 	// Test NewBatch
-	fmt.Println("# Batch Put key1, key2, key3")
+	fmt.Println("# Batch Put key1, key2, key99, key3")
 	b := db.NewBatch()
 	assert.NotNil(t, b, "Failed to create batch")
 
@@ -191,6 +205,9 @@ func TestUnderThreshold(t *testing.T) {
 	assert.NoError(t, err, "Failed to put key in batch")
 
 	err = b.Put([]byte("key2"), []byte("value2"))
+	assert.NoError(t, err, "Failed to put key in batch")
+
+	err = b.Put([]byte("key99"), []byte("value99"))
 	assert.NoError(t, err, "Failed to put key in batch")
 
 	err = b.Put([]byte("key3"), []byte("value3"))
@@ -204,10 +221,13 @@ func TestUnderThreshold(t *testing.T) {
 	iter := db.NewIterator([]byte("key"), []byte(""))
 	assert.NotNil(t, iter, "Failed to create iterator")
 
+	i := 1
 	for iter.Next() {
 		k := iter.Key()
 		v := iter.Value()
+		fmt.Println("i: ", i)
 		fmt.Printf("Got key: %s, value: %s\n", k, v)
+		i++
 	}
 
 	if err := iter.Error(); err != nil {
@@ -229,6 +249,7 @@ func TestUnderThreshold(t *testing.T) {
 	getValue, err = s.Get([]byte("key1"))
 	assert.NoError(t, err, "Failed to get key in snapshot")
 	assert.NotNil(t, getValue, "Expected to get a value for 'key' in snapshot")
+	assert.Equal(t, []byte("value1"), getValue, "Expected value 'value1' for 'key1' in snapshot")
 	s.Release()
 
 	// Test NewBatchWithSize

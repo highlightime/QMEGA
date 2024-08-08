@@ -818,6 +818,7 @@ type pebbleIterator struct {
 	releasedCold bool
 	validHot    bool
 	validCold   bool
+	turnHot     bool
 }
 
 // NewIterator creates a binary-alphabetical iterator over a subset
@@ -843,30 +844,58 @@ func (d *Database) NewIterator(prefix []byte, start []byte) ethdb.Iterator {
 		releasedCold: false,
 		validCold:  true,
 		validHot:   true,
+		turnHot:    true, // Start with hot
 	}
 }
 
-// Cold, Hot 둘 중 하나씩만 사용해야함
 func (iter *pebbleIterator) Next() bool {
 	if iter.movedHot && iter.movedCold {
-		iter.validHot = iter.iterHot.Valid()
-		iter.validCold = iter.iterCold.Valid() 
 		iter.movedHot = false
 		iter.movedCold = false
-		return iter.validHot || iter.validCold 
-	} 
+		iter.validHot = iter.iterHot.Valid()
+		iter.validCold = iter.iterCold.Valid()
+		if !iter.validHot {
+			iter.iterHot.Close()
+			iter.releasedHot = true
+		}
+		if !iter.validCold {
+			iter.iterCold.Close()
+			iter.releasedCold = true
+		}
+		return iter.validHot || iter.validCold
+	}
+	if iter.releasedHot && iter.releasedCold {
+		return false
+	}
 
-	if iter.validHot {
+	if iter.turnHot { // hotdb 볼 차례
 		fmt.Println("iterHot Next")
-		iter.validHot = iter.iterHot.Next()
-		return iter.validHot || iter.validCold
-	}
-	if iter.validCold {
+		if iter.validHot {
+			iter.validHot = iter.iterHot.Next()
+			if !iter.validHot {
+				iter.iterHot.Close()
+				iter.releasedHot = true
+			}
+		}
+		if !iter.releasedCold {
+			iter.turnHot = false
+		}
+	}else { // colddb 볼 차례
 		fmt.Println("iterCold Next")
-		iter.validCold = iter.iterCold.Next()
-		return iter.validHot || iter.validCold
+		if iter.validCold {
+			iter.validCold = iter.iterCold.Next()
+			if !iter.validCold {
+				iter.iterCold.Close()
+				iter.releasedCold = true
+			}
+		}
+		if !iter.releasedHot {
+			iter.turnHot = true
+		}
 	}
-	return false
+	
+	// Return true if either iterator is still valid
+	return iter.validHot || iter.validCold
 }
 
 // Error returns any accumulated error. Exhausting all the key/value pairs
@@ -882,11 +911,14 @@ func (iter *pebbleIterator) Error() error {
 // should not modify the contents of the returned slice, and its contents may
 // change on the next call to Next.
 func (iter *pebbleIterator) Key() []byte {
-	if iter.iterHot.Valid() {
-		return iter.iterHot.Key()
-	}
-	if iter.iterCold.Valid() {
-		return iter.iterCold.Key()
+	if iter.turnHot {
+		if iter.validHot {
+			return iter.iterHot.Key()
+		}
+	} else {
+		if iter.validCold {
+			return iter.iterCold.Key()
+		}
 	}
 	return nil
 }
@@ -895,11 +927,16 @@ func (iter *pebbleIterator) Key() []byte {
 // caller should not modify the contents of the returned slice, and its contents
 // may change on the next call to Next.
 func (iter *pebbleIterator) Value() []byte {
-	if iter.iterHot.Valid() {
-		return iter.iterHot.Value()
-	}
-	if iter.iterCold.Valid() {
-		return iter.iterCold.Value()
+	if iter.turnHot {
+		if iter.validHot {
+			fmt.Println("iterHot Value")
+			return iter.iterHot.Value()
+		}
+	} else {
+		if iter.validCold {
+			fmt.Println("iterCold Value")
+			return iter.iterCold.Value()
+		}
 	}
 	return nil
 }
