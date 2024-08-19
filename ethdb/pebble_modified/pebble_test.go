@@ -55,7 +55,7 @@ func TestOverThreshold(t *testing.T) {
 	assert.False(t, hasKey, "Expected key 'key' to be absent in database")
 
 	// Test Put with an empty database
-	fmt.Println("# Put key1, key4, key5 in cold db")
+	fmt.Println("# Put key1, key4, key6 in cold db")
 	err = db.PutForTest([]byte("key1"), []byte("value1"))
 	assert.NoError(t, err, "Failed to put key in database")
 	err = db.PutForTest([]byte("key4"), []byte("value4"))
@@ -71,9 +71,12 @@ func TestOverThreshold(t *testing.T) {
 	assert.Equal(t, []byte("value1"), getValue, "Expected value 'value1' for 'key1' in snapshot")
 
 	// Test NewBatch
-	fmt.Println("# Batch Put key10, key99, key2, key3 in hot db")
+	fmt.Println("# Batch Put key1, key10, key99, key2, key3, key4 in hot db")
 	b := db.NewBatch()
 	assert.NotNil(t, b, "Failed to create batch")
+
+	err = b.Put([]byte("key1"), []byte("value1"))
+	assert.NoError(t, err, "Failed to put key in batch")
 
 	err = b.Put([]byte("key10"), []byte("value10"))
 	assert.NoError(t, err, "Failed to put key in batch")
@@ -87,6 +90,9 @@ func TestOverThreshold(t *testing.T) {
 	err = b.Put([]byte("key3"), []byte("value3"))
 	assert.NoError(t, err, "Failed to put key in batch")
 
+	err = b.Put([]byte("key4"), []byte("value4"))
+	assert.NoError(t, err, "Failed to put key in batch")
+
 	err = b.Write()
 	assert.NoError(t, err, "Failed to write batch")
 
@@ -97,11 +103,13 @@ func TestOverThreshold(t *testing.T) {
 
 	// Test Next of Iterator
 	i := 1
+	answer:=[]string{"key1","key10","key2","key3","key4","key6","key99"}
 	for iter.Next() {
 		k := iter.Key()
 		v := iter.Value()
 		fmt.Println("i: ", i)
 		fmt.Printf("Got key: %s, value: %s\n", k, v)
+		assert.Equal(t, []byte(answer[i-1]), k, "Expected key 'key' to be present in database")
 		i++
 	}
 
@@ -197,7 +205,7 @@ func TestUnderThreshold(t *testing.T) {
 	assert.Error(t, err, "Expected to get an error for 'key'")
 
 	// Test NewBatch
-	fmt.Println("# Batch Put key1, key2, key99, key3")
+	fmt.Println("# Batch Put key1, key2, key99, key3, key9999")
 	b := db.NewBatch()
 	assert.NotNil(t, b, "Failed to create batch")
 
@@ -213,6 +221,9 @@ func TestUnderThreshold(t *testing.T) {
 	err = b.Put([]byte("key3"), []byte("value3"))
 	assert.NoError(t, err, "Failed to put key in batch")
 
+	err = b.Put([]byte("key9999"), []byte("value9999"))
+	assert.NoError(t, err, "Failed to put key in batch")
+
 	err = b.Write()
 	assert.NoError(t, err, "Failed to write batch")
 
@@ -222,11 +233,13 @@ func TestUnderThreshold(t *testing.T) {
 	assert.NotNil(t, iter, "Failed to create iterator")
 
 	i := 1
+	answer:=[]string{"key1","key2","key3","key99", "key9999"}
 	for iter.Next() {
 		k := iter.Key()
 		v := iter.Value()
 		fmt.Println("i: ", i)
 		fmt.Printf("Got key: %s, value: %s\n", k, v)
+		assert.Equal(t, []byte(answer[i-1]), k, "Expected key 'key' to be present in database")
 		i++
 	}
 

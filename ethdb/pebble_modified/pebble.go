@@ -844,7 +844,7 @@ func (d *Database) NewIterator(prefix []byte, start []byte) ethdb.Iterator {
 		releasedCold: false,
 		validCold:  true,
 		validHot:   true,
-		turnHot:    true, // Start with hot
+		turnHot:    true, // current turn
 	}
 }
 
@@ -853,48 +853,55 @@ func (iter *pebbleIterator) Next() bool {
 		iter.movedHot = false
 		iter.movedCold = false
 		iter.validHot = iter.iterHot.Valid()
-		iter.validCold = iter.iterCold.Valid()
-		if !iter.validHot {
-			iter.iterHot.Close()
-			iter.releasedHot = true
-		}
-		if !iter.validCold {
-			iter.iterCold.Close()
-			iter.releasedCold = true
+		iter.validCold = iter.iterCold.Valid()		
+		if iter.validHot && iter.validCold {
+			result := bytes.Compare(iter.KeyHot(), iter.KeyCold())
+			if result > 0 {
+				iter.turnHot = false
+			}else if result < 0 {
+				iter.turnHot = true
+			}else {
+				iter.turnHot = true
+				iter.validCold = iter.iterCold.Next()
+			}
+		}else if iter.validHot {
+			iter.turnHot = true
+		}else if iter.validCold {
+			iter.turnHot = false
 		}
 		return iter.validHot || iter.validCold
 	}
-	if iter.releasedHot && iter.releasedCold {
-		return false
-	}
 
-	if iter.turnHot { // hotdb 볼 차례
-		fmt.Println("iterHot Next")
-		if iter.validHot {
-			iter.validHot = iter.iterHot.Next()
-			if !iter.validHot {
-				iter.iterHot.Close()
-				iter.releasedHot = true
-			}
-		}
-		if !iter.releasedCold {
-			iter.turnHot = false
-		}
-	}else { // colddb 볼 차례
-		fmt.Println("iterCold Next")
-		if iter.validCold {
-			iter.validCold = iter.iterCold.Next()
-			if !iter.validCold {
-				iter.iterCold.Close()
-				iter.releasedCold = true
-			}
-		}
-		if !iter.releasedHot {
-			iter.turnHot = true
-		}
+	if iter.turnHot {
+		iter.validHot = iter.iterHot.Next()
+	} else {
+		iter.validCold = iter.iterCold.Next()
 	}
 	
-	// Return true if either iterator is still valid
+	if iter.validHot && iter.validCold {
+		result := bytes.Compare(iter.KeyHot(), iter.KeyCold())
+		if result > 0 {
+			iter.turnHot = false
+		}else if result < 0 {
+			iter.turnHot = true
+		}else {
+			if iter.turnHot {
+				iter.validCold = iter.iterCold.Next()
+			}else {
+				iter.validHot = iter.iterHot.Next()
+			}
+			if iter.validHot {
+				iter.turnHot = true
+			}else {
+				iter.turnHot = false
+			}
+		}
+	}else if iter.validHot {
+		iter.turnHot = true
+	}else if iter.validCold {
+		iter.turnHot = false
+	}
+	
 	return iter.validHot || iter.validCold
 }
 
@@ -912,13 +919,23 @@ func (iter *pebbleIterator) Error() error {
 // change on the next call to Next.
 func (iter *pebbleIterator) Key() []byte {
 	if iter.turnHot {
-		if iter.validHot {
-			return iter.iterHot.Key()
-		}
+		return iter.iterHot.Key()
 	} else {
-		if iter.validCold {
-			return iter.iterCold.Key()
-		}
+		return iter.iterCold.Key()
+	}
+	return nil
+}
+
+func (iter *pebbleIterator) KeyHot() []byte {
+	if iter.validHot {
+		return iter.iterHot.Key()
+	}
+	return nil
+}
+
+func (iter *pebbleIterator) KeyCold() []byte {
+	if iter.validCold {
+		return iter.iterCold.Key()
 	}
 	return nil
 }
@@ -928,15 +945,9 @@ func (iter *pebbleIterator) Key() []byte {
 // may change on the next call to Next.
 func (iter *pebbleIterator) Value() []byte {
 	if iter.turnHot {
-		if iter.validHot {
-			fmt.Println("iterHot Value")
-			return iter.iterHot.Value()
-		}
+		return iter.iterHot.Value()
 	} else {
-		if iter.validCold {
-			fmt.Println("iterCold Value")
-			return iter.iterCold.Value()
-		}
+		return iter.iterCold.Value()
 	}
 	return nil
 }
