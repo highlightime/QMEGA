@@ -56,11 +56,11 @@ func TestOverThreshold(t *testing.T) {
 
 	// Test Put with an empty database
 	fmt.Println("# Put key1, key4, key6 in cold db")
-	err = db.PutForTest([]byte("key1"), []byte("value1"))
+	err = db.PutForTest([]byte("key1"), []byte("cold1"))
 	assert.NoError(t, err, "Failed to put key in database")
-	err = db.PutForTest([]byte("key4"), []byte("value4"))
+	err = db.PutForTest([]byte("key4"), []byte("cold4"))
 	assert.NoError(t, err, "Failed to put key in database")
-	err = db.PutForTest([]byte("key6"), []byte("value6"))
+	err = db.PutForTest([]byte("key6"), []byte("cold6"))
 	assert.NoError(t, err, "Failed to put key in database")
 
 	// Test Get with a database having the key
@@ -68,29 +68,29 @@ func TestOverThreshold(t *testing.T) {
 	getValue, err := db.Get([]byte("key1"))
 	assert.NoError(t, err, "Failed to get key in database")
 	assert.NotNil(t, getValue, "Expected to get a value for 'key'")
-	assert.Equal(t, []byte("value1"), getValue, "Expected value 'value1' for 'key1' in snapshot")
+	assert.Equal(t, []byte("cold1"), getValue, "Expected value 'cold1' for 'key1' in snapshot")
 
 	// Test NewBatch
 	fmt.Println("# Batch Put key1, key10, key99, key2, key3, key4 in hot db")
 	b := db.NewBatch()
 	assert.NotNil(t, b, "Failed to create batch")
 
-	err = b.Put([]byte("key1"), []byte("value1"))
+	err = b.Put([]byte("key1"), []byte("hot1"))
 	assert.NoError(t, err, "Failed to put key in batch")
 
-	err = b.Put([]byte("key10"), []byte("value10"))
+	err = b.Put([]byte("key10"), []byte("hot10"))
 	assert.NoError(t, err, "Failed to put key in batch")
 
-	err = b.Put([]byte("key99"), []byte("value99"))
+	err = b.Put([]byte("key99"), []byte("hot99"))
 	assert.NoError(t, err, "Failed to put key in batch")
 
-	err = b.Put([]byte("key2"), []byte("value2"))
+	err = b.Put([]byte("key2"), []byte("hot2"))
 	assert.NoError(t, err, "Failed to put key in batch")
 
-	err = b.Put([]byte("key3"), []byte("value3"))
+	err = b.Put([]byte("key3"), []byte("hot3"))
 	assert.NoError(t, err, "Failed to put key in batch")
 
-	err = b.Put([]byte("key4"), []byte("value4"))
+	err = b.Put([]byte("key4"), []byte("hot4"))
 	assert.NoError(t, err, "Failed to put key in batch")
 
 	err = b.Write()
@@ -103,13 +103,15 @@ func TestOverThreshold(t *testing.T) {
 
 	// Test Next of Iterator
 	i := 1
-	answer:=[]string{"key1","key10","key2","key3","key4","key6","key99"}
+	answerKey:=[]string{"key1","key10","key2","key3","key4","key6","key99"}
+	answerValue:=[]string{"hot1","hot10","hot2","hot3","hot4","cold6","hot99"}
 	for iter.Next() {
 		k := iter.Key()
 		v := iter.Value()
 		fmt.Println("i: ", i)
 		fmt.Printf("Got key: %s, value: %s\n", k, v)
-		assert.Equal(t, []byte(answer[i-1]), k, "Expected key 'key' to be present in database")
+		assert.Equal(t, []byte(answerKey[i-1]), k, "Expected key to be present in database")
+		assert.Equal(t, []byte(answerValue[i-1]), v, "Expected value for 'key' in database")
 		i++
 	}
 
@@ -133,7 +135,7 @@ func TestOverThreshold(t *testing.T) {
 	getValue, err = s.Get([]byte("key1"))
 	assert.NoError(t, err, "Failed to get key in snapshot")
 	assert.NotNil(t, getValue, "Expected to get a value for 'key' in snapshot")
-	assert.Equal(t, []byte("value1"), getValue, "Expected value 'value1' for 'key1' in snapshot")
+	assert.Equal(t, []byte("hot1"), getValue, "Expected value 'hot1' for 'key1' in snapshot")
 	s.Release()
 
 	// Test NewBatchWithSize
