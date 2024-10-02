@@ -24,6 +24,9 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"syscall"
+	// "unsafe"
+	// "runtime/debug"
 
 	"github.com/cockroachdb/pebble"
 	"github.com/cockroachdb/pebble/bloom"
@@ -31,6 +34,7 @@ import (
 	"github.com/ethereum/go-ethereum/ethdb"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/metrics"
+	"github.com/ethereum/go-ethereum/ethdb/eviction/lru"
 )
 
 const (
@@ -51,12 +55,19 @@ const (
 	degradationWarnInterval = time.Minute
 )
 
+var overThresholdFlag = false
+const path = "."
+
 // Database is a persistent key-value store based on the pebble storage engine.
 // Apart from basic data storage functionality it also supports batch writes and
 // iterating over the keyspace in binary-alphabetical order.
 type Database struct {
-	fn string     // filename for reporting
-	db *pebble.DB // Underlying pebble storage engine
+	hotFn string     // filename for reporting
+	coldFn string     // filename for reporting
+	hotDb *pebble.DB // Underlying pebble storage engine
+	coldDb *pebble.DB
+	ssdThreshold int
+	hotCache *lru.Eviction
 
 	compTimeMeter       metrics.Meter // Meter for measuring the total time spent in database compaction
 	compReadMeter       metrics.Meter // Meter for measuring the data read during compaction
@@ -93,6 +104,22 @@ type Database struct {
 
 	writeOptions *pebble.WriteOptions
 }
+
+func getDiskUsage(path string) (total uint64, free uint64, used uint64, usage float64, err error) {
+	fs := syscall.Statfs_t{}
+	err = syscall.Statfs(path, &fs)
+	if err != nil {
+		return
+	}
+
+	total = fs.Blocks * uint64(fs.Bsize)
+	free = fs.Bfree * uint64(fs.Bsize)
+	used = total - free
+	usage = (float64(used) / float64(total)) * 100
+
+	return
+}
+
 
 func (d *Database) onCompactionBegin(info pebble.CompactionInfo) {
 	if d.activeComp == 0 {
@@ -144,7 +171,7 @@ func (l panicLogger) Fatalf(format string, args ...interface{}) {
 
 // New returns a wrapped pebble DB object. The namespace is the prefix that the
 // metrics reporting should use for surfacing internal stats.
-func New(file string, cache int, handles int, namespace string, readonly bool, ephemeral bool) (*Database, error) {
+func New(ssdThreshold int, file1, file2 string, cache int, handles int, namespace string, readonly bool, ephemeral bool) (*Database, error) {
 	// Ensure we have some minimal caching and file guarantees
 	if cache < minCache {
 		cache = minCache
@@ -152,7 +179,7 @@ func New(file string, cache int, handles int, namespace string, readonly bool, e
 	if handles < minHandles {
 		handles = minHandles
 	}
-	logger := log.New("database", file)
+	logger := log.New("database", file1)
 	logger.Info("Allocated cache and file handles", "cache", common.StorageSize(cache*1024*1024), "handles", handles)
 
 	// The max memtable size is limited by the uint32 offsets stored in
@@ -182,10 +209,13 @@ func New(file string, cache int, handles int, namespace string, readonly bool, e
 		memTableSize = maxMemTableSize - 1
 	}
 	db := &Database{
-		fn:           file,
+		hotFn:           file1,
+		coldFn:           file2,
+		ssdThreshold:   ssdThreshold,
 		log:          logger,
 		quitChan:     make(chan chan error),
 		writeOptions: &pebble.WriteOptions{Sync: !ephemeral},
+		hotCache:          lru.New(),
 	}
 	opt := &pebble.Options{
 		// Pebble has a single combined cache area and the write
@@ -234,11 +264,16 @@ func New(file string, cache int, handles int, namespace string, readonly bool, e
 	opt.Experimental.ReadSamplingMultiplier = -1
 
 	// Open the db and recover any potential corruptions
-	innerDB, err := pebble.Open(file, opt)
+	innerDB1, err := pebble.Open(file1, opt)
 	if err != nil {
 		return nil, err
 	}
-	db.db = innerDB
+	db.hotDb = innerDB1
+	innerDB2, err := pebble.Open(file2, opt)
+	if err != nil {
+		return nil, err
+	}
+	db.coldDb = innerDB2
 
 	db.compTimeMeter = metrics.GetOrRegisterMeter(namespace+"compact/time", nil)
 	db.compReadMeter = metrics.GetOrRegisterMeter(namespace+"compact/input", nil)
@@ -277,19 +312,38 @@ func (d *Database) Close() error {
 		}
 		d.quitChan = nil
 	}
-	return d.db.Close()
+	err1 := d.hotDb.Close()
+	err2 := d.coldDb.Close()
+	if err1 != nil {
+		return err1
+	}
+	if err2 != nil {
+		return err2
+	}
+	return nil
 }
 
 // Has retrieves if a key is present in the key-value store.
 func (d *Database) Has(key []byte) (bool, error) {
+	// fmt.Printf("h:k: %X\n", key)
 	d.quitLock.RLock()
 	defer d.quitLock.RUnlock()
 	if d.closed {
 		return false, pebble.ErrClosed
 	}
-	_, closer, err := d.db.Get(key)
+	fmt.Println("Has in hot db")
+	_, closer, err := d.hotDb.Get(key)
 	if err == pebble.ErrNotFound {
-		return false, nil
+		// check cold db if key is not found in hot db
+		fmt.Println("Has in cold db")
+		_, closer, err := d.coldDb.Get(key)
+		if err == pebble.ErrNotFound {
+			return false, nil
+		}else if err != nil {
+			return false, err
+		}
+		defer closer.Close()
+		return true, nil
 	} else if err != nil {
 		return false, err
 	}
@@ -299,61 +353,159 @@ func (d *Database) Has(key []byte) (bool, error) {
 
 // Get retrieves the given key if it's present in the key-value store.
 func (d *Database) Get(key []byte) ([]byte, error) {
+	// fmt.Printf("g:k: %X\n", key)
 	d.quitLock.RLock()
 	defer d.quitLock.RUnlock()
 	if d.closed {
 		return nil, pebble.ErrClosed
 	}
-	dat, closer, err := d.db.Get(key)
+	fmt.Println("Get in hot db")
+	dat, closer, err := d.hotDb.Get(key)
 	if err != nil {
-		return nil, err
+		// check cold db if key is not found in hot db
+		fmt.Println("Get in cold db")
+		dat, closer, err := d.coldDb.Get(key)
+		if err != nil {
+			return nil, err
+		}
+		ret := make([]byte, len(dat))
+		copy(ret, dat)
+		closer.Close()
+		return ret, nil
 	}
 	ret := make([]byte, len(dat))
 	copy(ret, dat)
 	closer.Close()
 	return ret, nil
 }
-
 // Put inserts the given value into the key-value store.
 func (d *Database) Put(key []byte, value []byte) error {
+	// fmt.Printf("p:k: %X v: %d\n", key, int(unsafe.Sizeof(value)))
+	// debug.PrintStack()
 	d.quitLock.RLock()
 	defer d.quitLock.RUnlock()
 	if d.closed {
 		return pebble.ErrClosed
 	}
-	return d.db.Set(key, value, d.writeOptions)
+	
+	total, free, used, usage, err := getDiskUsage(path)
+	if err != nil {
+		fmt.Println("Error:", err)
+		return err
+	}
+	fmt.Printf("Total: %d bytes\nFree: %d bytes\nUsed: %d bytes\nUsage: %.2f%%\n", total, free, used, usage)
+	
+	if usage >= float64(d.ssdThreshold) {
+		overThresholdFlag = true
+	} else {
+		overThresholdFlag = false
+	}
+
+	if overThresholdFlag {
+		// lru.eviction
+		// handling empty cache
+		if d.hotCache.Len() == 0 {
+			return d.coldDb.Set(key, value, d.writeOptions)
+		}
+		key, success := d.hotCache.SelectVictim()
+		if success {
+			if d.hotCache.Delete(key){
+				return d.coldDb.Set(key, value, d.writeOptions)
+			}
+		}
+		return fmt.Errorf("No key to evict")
+	}else{
+		d.hotCache.Push(key)
+		return d.hotDb.Set(key, value, d.writeOptions)
+	}
+
+}
+
+// Put inserts the given value into the key-value store.
+func (d *Database) PutForTest(key []byte, value []byte) error {
+	d.quitLock.RLock()
+	defer d.quitLock.RUnlock()
+	if d.closed {
+		return pebble.ErrClosed
+	}
+	// total, free, used, usage, err := getDiskUsage(path)
+	_, _, _, usage, err := getDiskUsage(path)
+	if err != nil {
+		fmt.Println("Error:", err)
+		return err
+	}
+	fmt.Printf("Usage: %.2f%%\nThreshold: %d%%\n",usage,d.ssdThreshold)
+	
+	if usage >= float64(d.ssdThreshold) {
+		overThresholdFlag = true
+	} else {
+		overThresholdFlag = false
+	}
+
+	if overThresholdFlag {
+		// lru.eviction
+		// handling empty cache
+		if d.hotCache.Len() == 0 {
+			return d.coldDb.Set(key, value, d.writeOptions)
+		}
+		key, success := d.hotCache.SelectVictim()
+		if success {
+			if d.hotCache.Delete(key){
+				return d.coldDb.Set(key, value, d.writeOptions)
+			}
+		}
+		return fmt.Errorf("No key to evict")
+	}else{
+		d.hotCache.Push(key)
+		return d.hotDb.Set(key, value, d.writeOptions)	
+	}
 }
 
 // Delete removes the key from the key-value store.
 func (d *Database) Delete(key []byte) error {
+	// fmt.Printf("d:k: %X\n", key)
 	d.quitLock.RLock()
 	defer d.quitLock.RUnlock()
 	if d.closed {
 		return pebble.ErrClosed
 	}
-	return d.db.Delete(key, nil)
+	err := d.hotDb.Delete(key, d.writeOptions) 
+	if err != nil {
+		return err
+	}
+	d.hotCache.Delete(key)
+	if err := d.coldDb.Delete(key, d.writeOptions); err != nil {
+		return err
+	}
+	return nil
 }
+
 
 // NewBatch creates a write-only key-value store that buffers changes to its host
 // database until a final write is called.
 func (d *Database) NewBatch() ethdb.Batch {
 	return &batch{
-		b:  d.db.NewBatch(),
+		bHot:  d.hotDb.NewBatch(),
+		bCold: d.coldDb.NewBatch(),
 		db: d,
 	}
 }
+
 
 // NewBatchWithSize creates a write-only database batch with pre-allocated buffer.
 func (d *Database) NewBatchWithSize(size int) ethdb.Batch {
 	return &batch{
-		b:  d.db.NewBatchWithSize(size),
+		bHot:  d.hotDb.NewBatchWithSize(size),
+		bCold:  d.coldDb.NewBatchWithSize(size),
 		db: d,
 	}
 }
 
+
 // snapshot wraps a pebble snapshot for implementing the Snapshot interface.
 type snapshot struct {
-	db *pebble.Snapshot
+	dbHot *pebble.Snapshot
+	dbCold *pebble.Snapshot
 }
 
 // NewSnapshot creates a database snapshot based on the current state.
@@ -362,42 +514,69 @@ type snapshot struct {
 // Note don't forget to release the snapshot once it's used up, otherwise
 // the stale data will never be cleaned up by the underlying compactor.
 func (d *Database) NewSnapshot() (ethdb.Snapshot, error) {
-	snap := d.db.NewSnapshot()
-	return &snapshot{db: snap}, nil
+	snapHot := d.hotDb.NewSnapshot()
+	snapCold := d.coldDb.NewSnapshot()
+	return &snapshot{dbHot: snapHot, dbCold: snapCold}, nil
+}
+// Has checks if the given key is present in either the hot or cold snapshot.
+func (snap *snapshot) Has(key []byte) (bool, error) {
+	// Check in hot snapshot
+	if has, err := snap.hasInSnapshot(snap.dbHot, key); err != nil || has {
+		fmt.Println("Has in snapshot of hot db")
+		return has, err
+	}
+
+	// Check in cold snapshot
+	fmt.Println("Has in snapshot of cold db")
+	return snap.hasInSnapshot(snap.dbCold, key)
 }
 
-// Has retrieves if a key is present in the snapshot backing by a key-value
-// data store.
-func (snap *snapshot) Has(key []byte) (bool, error) {
-	_, closer, err := snap.db.Get(key)
+// hasInSnapshot is a helper function to check if a key exists in a given snapshot.
+func (snap *snapshot) hasInSnapshot(snapDb *pebble.Snapshot, key []byte) (bool, error) {
+	_, closer, err := snapDb.Get(key)
 	if err != nil {
 		if err != pebble.ErrNotFound {
 			return false, err
-		} else {
-			return false, nil
 		}
+		return false, nil
 	}
 	closer.Close()
 	return true, nil
 }
 
-// Get retrieves the given key if it's present in the snapshot backing by
-// key-value data store.
+// Get retrieves the given key if it's present in either the hot or cold snapshot.
 func (snap *snapshot) Get(key []byte) ([]byte, error) {
-	dat, closer, err := snap.db.Get(key)
+	// Try to get from hot snapshot
+	if data, err := snap.getFromSnapshot(snap.dbHot, key); err == nil {
+		fmt.Println("Get in snapshot of hot db")
+		return data, nil
+	} else if err != pebble.ErrNotFound {
+		return nil, err
+	}
+
+	// Try to get from cold snapshot
+	fmt.Println("Get in snapshot of cold db")
+	return snap.getFromSnapshot(snap.dbCold, key)
+}
+
+// getFromSnapshot is a helper function to get a key from a given snapshot.
+func (snap *snapshot) getFromSnapshot(snapDb *pebble.Snapshot, key []byte) ([]byte, error) {
+	dat, closer, err := snapDb.Get(key)
 	if err != nil {
 		return nil, err
 	}
+	defer closer.Close()
+
 	ret := make([]byte, len(dat))
 	copy(ret, dat)
-	closer.Close()
 	return ret, nil
 }
 
 // Release releases associated resources. Release should always succeed and can
 // be called multiple times without causing error.
 func (snap *snapshot) Release() {
-	snap.db.Close()
+	snap.dbHot.Close()
+	snap.dbCold.Close()
 }
 
 // upperBound returns the upper bound for the given prefix
@@ -416,9 +595,11 @@ func upperBound(prefix []byte) (limit []byte) {
 }
 
 // Stat returns the internal metrics of Pebble in a text format. It's a developer
-// method to read everything there is to read, independent of Pebble version.
+// method to read everything there is to read independent of Pebble version.
+//
+// The property is unused in Pebble as there's only one thing to retrieve.
 func (d *Database) Stat() (string, error) {
-	return d.db.Metrics().String(), nil
+	return d.hotDb.Metrics().String(), nil
 }
 
 // Compact flattens the underlying data store for the given key range. In essence,
@@ -440,12 +621,22 @@ func (d *Database) Compact(start []byte, limit []byte) error {
 	if limit == nil {
 		limit = bytes.Repeat([]byte{0xff}, 32)
 	}
-	return d.db.Compact(start, limit, true) // Parallelization is preferred
+	// TODO: Parallelization Compaction?
+	// Compact both hot and cold databases
+	if err := d.hotDb.Compact(start, limit, true); err != nil {
+		return err
+	}
+
+	if err := d.coldDb.Compact(start, limit, true); err != nil {
+		return err
+	}
+
+	return nil
 }
 
 // Path returns the path to the database directory.
 func (d *Database) Path() string {
-	return d.fn
+	return d.hotFn
 }
 
 // meter periodically retrieves internal pebble counters and reports them to
@@ -475,7 +666,7 @@ func (d *Database) meter(refresh time.Duration, namespace string) {
 			compRead  int64
 			nWrite    int64
 
-			stats              = d.db.Metrics()
+			stats              = d.hotDb.Metrics()
 			compTime           = d.compTime.Load()
 			writeDelayCount    = d.writeDelayCount.Load()
 			writeDelayTime     = d.writeDelayTime.Load()
@@ -561,22 +752,30 @@ func (d *Database) meter(refresh time.Duration, namespace string) {
 // batch is a write-only batch that commits changes to its host database
 // when Write is called. A batch cannot be used concurrently.
 type batch struct {
-	b    *pebble.Batch
+	bHot    *pebble.Batch
+	bCold    *pebble.Batch
 	db   *Database
 	size int
 }
 
 // Put inserts the given value into the batch for later committing.
 func (b *batch) Put(key, value []byte) error {
-	b.b.Set(key, value, nil)
+	//linas
+	// fmt.Printf("bp:k: %X v: %d\n", key, int(unsafe.Sizeof(value)))
+	// debug.PrintStack()
+	b.bHot.Set(key, value, nil)
 	b.size += len(key) + len(value)
+	b.db.hotCache.Push(key)
 	return nil
 }
 
 // Delete inserts the key removal into the batch for later committing.
 func (b *batch) Delete(key []byte) error {
-	b.b.Delete(key, nil)
+	// fmt.Printf("bd:k: %X\n", key)
+	b.bHot.Delete(key, nil)
+	b.bCold.Delete(key, nil)
 	b.size += len(key)
+	b.db.hotCache.Delete(key)
 	return nil
 }
 
@@ -592,18 +791,32 @@ func (b *batch) Write() error {
 	if b.db.closed {
 		return pebble.ErrClosed
 	}
-	return b.b.Commit(b.db.writeOptions)
+	if err := b.bHot.Commit(b.db.writeOptions); err != nil {
+		fmt.Println("dbHot Batch Write Error:", err)
+		return err
+	}
+	return nil
 }
 
 // Reset resets the batch for reuse.
 func (b *batch) Reset() {
-	b.b.Reset()
+	b.bHot.Reset()
+	b.bCold.Reset()
 	b.size = 0
 }
 
-// Replay replays the batch contents.
 func (b *batch) Replay(w ethdb.KeyValueWriter) error {
-	reader := b.b.Reader()
+	// Replay hot batch
+	if err := replayBatch(b.bHot, w); err != nil {
+		fmt.Println("dbHot Batch Replay Error:", err)
+		return err
+	}
+	return nil
+}
+
+// replayBatch replays the operations in the given batch to the KeyValueWriter.
+func replayBatch(batch *pebble.Batch, w ethdb.KeyValueWriter) error {
+	reader := batch.Reader()
 	for {
 		kind, k, v, ok, err := reader.Next()
 		if !ok || err != nil {
@@ -627,58 +840,158 @@ func (b *batch) Replay(w ethdb.KeyValueWriter) error {
 //
 // The pebble iterator is not thread-safe.
 type pebbleIterator struct {
-	iter     *pebble.Iterator
-	moved    bool
-	released bool
+	iterHot     *pebble.Iterator
+	iterCold    *pebble.Iterator
+	movedHot    bool
+	movedCold   bool
+	releasedHot bool
+	releasedCold bool
+	validHot    bool
+	validCold   bool
+	turnHot     bool
 }
 
 // NewIterator creates a binary-alphabetical iterator over a subset
 // of database content with a particular key prefix, starting at a particular
 // initial key (or after, if it does not exist).
 func (d *Database) NewIterator(prefix []byte, start []byte) ethdb.Iterator {
-	iter, _ := d.db.NewIter(&pebble.IterOptions{
+	iterHot, _ := d.hotDb.NewIter(&pebble.IterOptions{
 		LowerBound: append(prefix, start...),
 		UpperBound: upperBound(prefix),
 	})
-	iter.First()
-	return &pebbleIterator{iter: iter, moved: true, released: false}
+	iterCold, _ := d.coldDb.NewIter(&pebble.IterOptions{
+		LowerBound: append(prefix, start...),
+		UpperBound: upperBound(prefix),
+	})
+	iterHot.First()
+	iterCold.First()
+	return &pebbleIterator{
+		iterHot:     iterHot,
+		iterCold:    iterCold,
+		movedHot:    true,
+		movedCold:   true,
+		releasedHot: false,
+		releasedCold: false,
+		validCold:  true,
+		validHot:   true,
+		turnHot:    true, // current turn
+	}
 }
 
-// Next moves the iterator to the next key/value pair. It returns whether the
-// iterator is exhausted.
 func (iter *pebbleIterator) Next() bool {
-	if iter.moved {
-		iter.moved = false
-		return iter.iter.Valid()
+	if iter.movedHot && iter.movedCold {
+		iter.movedHot = false
+		iter.movedCold = false
+		iter.validHot = iter.iterHot.Valid()
+		iter.validCold = iter.iterCold.Valid()		
+		if iter.validHot && iter.validCold {
+			result := bytes.Compare(iter.KeyHot(), iter.KeyCold())
+			if result > 0 {
+				iter.turnHot = false
+			}else if result < 0 {
+				iter.turnHot = true
+			}else {
+				iter.turnHot = true
+				iter.validCold = iter.iterCold.Next()
+			}
+		}else if iter.validHot {
+			iter.turnHot = true
+		}else if iter.validCold {
+			iter.turnHot = false
+		}
+		return iter.validHot || iter.validCold
 	}
-	return iter.iter.Next()
+
+	if iter.turnHot {
+		iter.validHot = iter.iterHot.Next()
+	} else {
+		iter.validCold = iter.iterCold.Next()
+	}
+	
+	if iter.validHot && iter.validCold {
+		result := bytes.Compare(iter.KeyHot(), iter.KeyCold())
+		if result > 0 {
+			iter.turnHot = false
+		}else if result < 0 {
+			iter.turnHot = true
+		}else {
+			if iter.turnHot {
+				iter.validCold = iter.iterCold.Next()
+			}else {
+				iter.validHot = iter.iterHot.Next()
+			}
+			if iter.validHot {
+				iter.turnHot = true
+			}else {
+				iter.turnHot = false
+			}
+		}
+	}else if iter.validHot {
+		iter.turnHot = true
+	}else if iter.validCold {
+		iter.turnHot = false
+	}
+	
+	return iter.validHot || iter.validCold
 }
 
 // Error returns any accumulated error. Exhausting all the key/value pairs
 // is not considered to be an error.
 func (iter *pebbleIterator) Error() error {
-	return iter.iter.Error()
+	if err := iter.iterHot.Error(); err != nil {
+		return err
+	}
+	return iter.iterCold.Error()
 }
 
 // Key returns the key of the current key/value pair, or nil if done. The caller
 // should not modify the contents of the returned slice, and its contents may
 // change on the next call to Next.
 func (iter *pebbleIterator) Key() []byte {
-	return iter.iter.Key()
+	if iter.turnHot {
+		return iter.iterHot.Key()
+	} else {
+		return iter.iterCold.Key()
+	}
+	return nil
+}
+
+func (iter *pebbleIterator) KeyHot() []byte {
+	if iter.validHot {
+		return iter.iterHot.Key()
+	}
+	return nil
+}
+
+func (iter *pebbleIterator) KeyCold() []byte {
+	if iter.validCold {
+		return iter.iterCold.Key()
+	}
+	return nil
 }
 
 // Value returns the value of the current key/value pair, or nil if done. The
 // caller should not modify the contents of the returned slice, and its contents
 // may change on the next call to Next.
 func (iter *pebbleIterator) Value() []byte {
-	return iter.iter.Value()
+	if iter.turnHot {
+		return iter.iterHot.Value()
+	} else {
+		return iter.iterCold.Value()
+	}
+	return nil
 }
 
 // Release releases associated resources. Release should always succeed and can
 // be called multiple times without causing error.
 func (iter *pebbleIterator) Release() {
-	if !iter.released {
-		iter.iter.Close()
-		iter.released = true
+	if !iter.releasedHot {
+		iter.iterHot.Close()
+		iter.releasedHot = true
+	}
+	if !iter.releasedCold {
+		iter.iterCold.Close()
+		iter.releasedCold = true
 	}
 }
+
