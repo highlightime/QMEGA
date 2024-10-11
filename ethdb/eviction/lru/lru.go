@@ -77,7 +77,7 @@ func (e *Eviction) Push(key []byte) bool {
 	strKey := string(key)
 	val := e.elemmap[strKey]
 	if val != nil {
-		e.Access(key)
+		e.lruList.MoveToBack(val)
 		return false
 	}
 	elem := e.lruList.PushBack(strKey)

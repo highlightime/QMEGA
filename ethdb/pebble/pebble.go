@@ -803,11 +803,11 @@ func (b *batch) Write() error {
 	}
 
 	for _, op_key := range b.opList {
-		op := op_key[0:0]
+		op := op_key[0]
 		key := op_key[1:]
-		if op == "A" {
+		if op == 'A' {
 			b.db.hotCache.Push([]byte(key))
-		} else if op == "D" {
+		} else if op == 'D' {
 			b.db.hotCache.Delete([]byte(key))
 		} else {
 			return pebble.ErrInvalidBatch
