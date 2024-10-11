@@ -411,13 +411,14 @@ func (d *Database) Put(key []byte, value []byte) error {
 		}
 		key, success := d.hotCache.SelectVictim()
 		if success {
-			if d.hotCache.Delete(key) {
+			success, _ := d.hotCache.Delete(key)
+			if success {
 				return d.coldDb.Set(key, value, d.writeOptions)
 			}
 		}
 		return fmt.Errorf("No key to evict")
 	} else {
-		d.hotCache.Push(key)
+		d.hotCache.Push(key, len(key)+len(value))
 		return d.hotDb.Set(key, value, d.writeOptions)
 	}
 
@@ -452,13 +453,14 @@ func (d *Database) PutForTest(key []byte, value []byte) error {
 		}
 		key, success := d.hotCache.SelectVictim()
 		if success {
-			if d.hotCache.Delete(key) {
+			success, _ = d.hotCache.Delete(key)
+			if success {
 				return d.coldDb.Set(key, value, d.writeOptions)
 			}
 		}
 		return fmt.Errorf("No key to evict")
 	} else {
-		d.hotCache.Push(key)
+		d.hotCache.Push(key, len(key)+len(value))
 		return d.hotDb.Set(key, value, d.writeOptions)
 	}
 }
@@ -749,6 +751,12 @@ func (d *Database) meter(refresh time.Duration, namespace string) {
 	errc <- nil
 }
 
+type OpEntry struct {
+	op   bool // True: Put, False: delete
+	key  []byte
+	size int // size is 0 for delete
+}
+
 // batch is a write-only batch that commits changes to its host database
 // when Write is called. A batch cannot be used concurrently.
 type batch struct {
@@ -756,7 +764,7 @@ type batch struct {
 	bCold  *pebble.Batch
 	db     *Database
 	size   int
-	opList []string
+	opList []OpEntry
 }
 
 // Put inserts the given value into the batch for later committing.
@@ -766,7 +774,7 @@ func (b *batch) Put(key, value []byte) error {
 	// debug.PrintStack()
 	b.bHot.Set(key, value, nil)
 	b.size += len(key) + len(value)
-	b.opList = append(b.opList, "A"+string(key))
+	b.opList = append(b.opList, OpEntry{op: true, key: key, size: len(key) + len(value)})
 	return nil
 }
 
@@ -776,7 +784,7 @@ func (b *batch) Delete(key []byte) error {
 	b.bHot.Delete(key, nil)
 	b.bCold.Delete(key, nil)
 	b.size += len(key)
-	b.opList = append(b.opList, "D"+string(key))
+	b.opList = append(b.opList, OpEntry{op: false, key: key, size: 0})
 	return nil
 }
 
@@ -802,15 +810,14 @@ func (b *batch) Write() error {
 		return err
 	}
 
-	for _, op_key := range b.opList {
-		op := op_key[0]
-		key := op_key[1:]
-		if op == 'A' {
-			b.db.hotCache.Push([]byte(key))
-		} else if op == 'D' {
-			b.db.hotCache.Delete([]byte(key))
+	for _, op_entry := range b.opList {
+		op := op_entry.op
+		key := op_entry.key
+		size := op_entry.size
+		if op {
+			b.db.hotCache.Push([]byte(key), size)
 		} else {
-			return pebble.ErrInvalidBatch
+			b.db.hotCache.Delete([]byte(key))
 		}
 	}
 
@@ -829,7 +836,8 @@ func (b *batch) Write() error {
 						fmt.Println("batch migration cold DB set error", err)
 					}
 
-					if b.db.hotCache.Delete(key) {
+					success, _ = b.db.hotCache.Delete(key)
+					if success {
 						fmt.Println("batch migration cache entry delete error")
 					}
 					closer.Close()
