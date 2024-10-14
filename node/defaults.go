@@ -34,6 +34,7 @@ const (
 	DefaultWSPort   = 8546        // Default TCP port for the websocket RPC server
 	DefaultAuthHost = "localhost" // Default host interface for the authenticated apis
 	DefaultAuthPort = 8551        // Default port for the authenticated apis
+	DefaultThreshold = 1          // Default threshold for hotdb
 )
 
 const (
@@ -73,6 +74,7 @@ var DefaultConfig = Config{
 		NAT:        nat.Any(),
 	},
 	DBEngine: "", // Use whatever exists, will default to Pebble if non-existent and supported
+	Threshold: DefaultThreshold,
 }
 
 // DefaultDataDir is the default data directory to use for the databases and other
