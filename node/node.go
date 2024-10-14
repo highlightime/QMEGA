@@ -730,6 +730,7 @@ func (n *Node) OpenDatabase(name string, cache, handles int, namespace string, r
 			Cache:     cache,
 			Handles:   handles,
 			ReadOnly:  readonly,
+			Threshold: int(n.config.Threshold),
 		})
 	}
 
@@ -763,6 +764,7 @@ func (n *Node) OpenDatabaseWithFreezer(name string, cache, handles int, ancient 
 			Cache:             cache,
 			Handles:           handles,
 			ReadOnly:          readonly,
+			Threshold: 		   int(n.config.Threshold),
 		})
 	}
 

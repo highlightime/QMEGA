@@ -122,6 +122,25 @@ func getDiskUsage(path string) (total uint64, free uint64, used uint64, usage fl
 	return
 }
 
+
+// 모든 키를 hotDb에서 읽어와 hotCache에 저장하는 함수
+func (db *Database) loadAllKeysIntoCache() error {
+	iter,_ := db.hotDb.NewIter(nil)
+	defer iter.Close()
+	fmt.Println("Loading all keys into cache")
+
+	for iter.Next() {
+		key := iter.Key()
+		// value := iter.Value()
+		db.hotCache.Push(key)
+	}
+
+	if err := iter.Error(); err != nil {
+		return err
+	}
+	return nil
+}
+
 func (d *Database) onCompactionBegin(info pebble.CompactionInfo) {
 	if d.activeComp == 0 {
 		d.compStartTime = time.Now()
@@ -270,6 +289,9 @@ func New(ssdThreshold int, file1, file2 string, cache int, handles int, namespac
 		return nil, err
 	}
 	db.hotDb = innerDB1
+	if err := db.loadAllKeysIntoCache(); err != nil {
+		return nil, err
+	}
 	innerDB2, err := pebble.Open(file2, opt)
 	if err != nil {
 		return nil, err
@@ -332,22 +354,27 @@ func (d *Database) Has(key []byte) (bool, error) {
 	if d.closed {
 		return false, pebble.ErrClosed
 	}
-	fmt.Println("Has in hot db")
 	_, closer, err := d.hotDb.Get(key)
 	if err == pebble.ErrNotFound {
 		// check cold db if key is not found in hot db
-		fmt.Println("Has in cold db")
 		_, closer, err := d.coldDb.Get(key)
 		if err == pebble.ErrNotFound {
 			return false, nil
 		} else if err != nil {
 			return false, err
 		}
+		d.hotCache.Push(key)
+		value, err := d.GetCold(key)
+		if err != nil {
+			return false, err
+		}
+		d.Put(key, value)
 		defer closer.Close()
 		return true, nil
 	} else if err != nil {
 		return false, err
 	}
+	d.hotCache.Access(key)
 	closer.Close()
 	return true, nil
 }
@@ -360,11 +387,9 @@ func (d *Database) Get(key []byte) ([]byte, error) {
 	if d.closed {
 		return nil, pebble.ErrClosed
 	}
-	fmt.Println("Get in hot db")
 	dat, closer, err := d.hotDb.Get(key)
 	if err != nil {
 		// check cold db if key is not found in hot db
-		fmt.Println("Get in cold db")
 		dat, closer, err := d.coldDb.Get(key)
 		if err != nil {
 			return nil, err
@@ -390,12 +415,12 @@ func (d *Database) Put(key []byte, value []byte) error {
 		return pebble.ErrClosed
 	}
 
-	total, free, used, usage, err := getDiskUsage(path)
+	_, _, _, usage, err := getDiskUsage(path)
 	if err != nil {
 		fmt.Println("Error:", err)
 		return err
 	}
-	fmt.Printf("Total: %d bytes\nFree: %d bytes\nUsed: %d bytes\nUsage: %.2f%%\n", total, free, used, usage)
+	// fmt.Printf("Total: %d bytes\nFree: %d bytes\nUsed: %d bytes\nUsage: %.2f%%\n", total, free, used, usage)
 
 	if usage >= float64(d.ssdThreshold) {
 		overThresholdFlag = true
@@ -423,6 +448,22 @@ func (d *Database) Put(key []byte, value []byte) error {
 
 }
 
+func (d *Database) GetCold(key []byte) ([]byte, error) {
+	d.quitLock.RLock()
+	defer d.quitLock.RUnlock()
+	if d.closed {
+		return nil, pebble.ErrClosed
+	}
+	dat, closer, err := d.coldDb.Get(key)
+	if err != nil {
+		return nil, err
+	}
+	ret := make([]byte, len(dat))
+	copy(ret, dat)
+	closer.Close()
+	return ret, nil
+}
+
 // Put inserts the given value into the key-value store.
 func (d *Database) PutForTest(key []byte, value []byte) error {
 	d.quitLock.RLock()
@@ -436,7 +477,7 @@ func (d *Database) PutForTest(key []byte, value []byte) error {
 		fmt.Println("Error:", err)
 		return err
 	}
-	fmt.Printf("Usage: %.2f%%\nThreshold: %d%%\n", usage, d.ssdThreshold)
+	// fmt.Printf("Usage: %.2f%%\nThreshold: %d%%\n", usage, d.ssdThreshold)
 
 	if usage >= float64(d.ssdThreshold) {
 		overThresholdFlag = true
@@ -522,12 +563,10 @@ func (d *Database) NewSnapshot() (ethdb.Snapshot, error) {
 func (snap *snapshot) Has(key []byte) (bool, error) {
 	// Check in hot snapshot
 	if has, err := snap.hasInSnapshot(snap.dbHot, key); err != nil || has {
-		fmt.Println("Has in snapshot of hot db")
 		return has, err
 	}
 
 	// Check in cold snapshot
-	fmt.Println("Has in snapshot of cold db")
 	return snap.hasInSnapshot(snap.dbCold, key)
 }
 
@@ -548,14 +587,12 @@ func (snap *snapshot) hasInSnapshot(snapDb *pebble.Snapshot, key []byte) (bool, 
 func (snap *snapshot) Get(key []byte) ([]byte, error) {
 	// Try to get from hot snapshot
 	if data, err := snap.getFromSnapshot(snap.dbHot, key); err == nil {
-		fmt.Println("Get in snapshot of hot db")
 		return data, nil
 	} else if err != pebble.ErrNotFound {
 		return nil, err
 	}
 
 	// Try to get from cold snapshot
-	fmt.Println("Get in snapshot of cold db")
 	return snap.getFromSnapshot(snap.dbCold, key)
 }
 
@@ -854,7 +891,10 @@ func (b *batch) Write() error {
 func (b *batch) Reset() {
 	b.bHot.Reset()
 	b.bCold.Reset()
+	b.bHot.Reset()
+	b.bCold.Reset()
 	b.size = 0
+	b.opList = nil
 	b.opList = nil
 }
 
@@ -862,6 +902,10 @@ func (b *batch) Replay(w ethdb.KeyValueWriter) error {
 	// Replay hot batch
 	if err := replayBatch(b.bHot, w); err != nil {
 		fmt.Println("dbHot Batch Replay Error:", err)
+		return err
+	}
+	if err := replayBatch(b.bCold, w); err != nil {
+		fmt.Println("dbCold Batch Replay Error:", err)
 		return err
 	}
 	return nil

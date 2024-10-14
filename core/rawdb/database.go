@@ -326,9 +326,9 @@ func NewLevelDBDatabase(file string, cache int, handles int, namespace string, r
 // NewPebbleDBDatabase creates a persistent key-value database without a freezer
 // moving immutable chain segments into cold storage.
 // linas
-func NewPebbleDBDatabase(file string, cache int, handles int, namespace string, readonly, ephemeral bool) (ethdb.Database, error) {
+func NewPebbleDBDatabase(file string, cache int, handles int, namespace string, readonly, ephemeral bool, threshold int) (ethdb.Database, error) {
 	// db, err := pebble.New(file, cache, handles, namespace, readonly, ephemeral)
-	db, err := pebble.New(10, file, file+"cold", cache, handles, namespace, readonly, ephemeral)
+	db, err := pebble.New(threshold, file, file+"cold", cache, handles, namespace, readonly, ephemeral)
 	if err != nil {
 		return nil, err
 	}
@@ -369,6 +369,7 @@ type OpenOptions struct {
 	// Ephemeral means that filesystem sync operations should be avoided: data integrity in the face of
 	// a crash is not important. This option should typically be used in tests.
 	Ephemeral bool
+	Threshold int // linas
 }
 
 // openKeyValueDatabase opens a disk-based key-value database, e.g. leveldb or pebble.
@@ -390,7 +391,7 @@ func openKeyValueDatabase(o OpenOptions) (ethdb.Database, error) {
 	}
 	if o.Type == dbPebble || existingDb == dbPebble {
 		log.Info("Using pebble as the backing database")
-		return NewPebbleDBDatabase(o.Directory, o.Cache, o.Handles, o.Namespace, o.ReadOnly, o.Ephemeral)
+		return NewPebbleDBDatabase(o.Directory, o.Cache, o.Handles, o.Namespace, o.ReadOnly, o.Ephemeral, o.Threshold)
 	}
 	if o.Type == dbLeveldb || existingDb == dbLeveldb {
 		log.Info("Using leveldb as the backing database")
@@ -398,7 +399,7 @@ func openKeyValueDatabase(o OpenOptions) (ethdb.Database, error) {
 	}
 	// No pre-existing database, no user-requested one either. Default to Pebble.
 	log.Info("Defaulting to pebble as the backing database")
-	return NewPebbleDBDatabase(o.Directory, o.Cache, o.Handles, o.Namespace, o.ReadOnly, o.Ephemeral)
+	return NewPebbleDBDatabase(o.Directory, o.Cache, o.Handles, o.Namespace, o.ReadOnly, o.Ephemeral, o.Threshold)
 }
 
 // Open opens both a disk-based key-value database such as leveldb or pebble, but also
