@@ -137,6 +137,12 @@ var (
 		Value:    ethconfig.Defaults.NetworkId,
 		Category: flags.EthCategory,
 	}
+	ThresholdFlag = &cli.Uint64Flag{
+		Name:     "threshold",
+		Usage:    "Threshold for the hot db storage",
+		Value:    ethconfig.Defaults.Threshold,
+		Category: flags.EthCategory,
+	}
 	MainnetFlag = &cli.BoolFlag{
 		Name:     "mainnet",
 		Usage:    "Ethereum mainnet",

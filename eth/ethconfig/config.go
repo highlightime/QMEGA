@@ -50,6 +50,7 @@ var FullNodeGPO = gasprice.Config{
 var Defaults = Config{
 	SyncMode:           downloader.SnapSync,
 	NetworkId:          0, // enable auto configuration of networkID == chainID
+Threshold:		  1,
 	TxLookupLimit:      2350000,
 	TransactionHistory: 2350000,
 	StateHistory:       params.FullImmutabilityThreshold,
