@@ -122,12 +122,6 @@ func getDiskUsage(path string) (total uint64, free uint64, used uint64, usage fl
 	return
 }
 
-func getPebbleDBSizeInMB(db *pebble.DB) (int, error) {
-    metrics := db.Metrics()
-    diskUsageBytes := metrics.DiskSpaceUsage()
-    diskUsageMB := int(diskUsageBytes / (1024 * 1024)) // MB 단위로 변환
-    return diskUsageMB, nil
-}
 
 // 모든 키를 hotDb에서 읽어와 hotCache에 저장하는 함수
 func (db *Database) loadAllKeysIntoCache() error {
