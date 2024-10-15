@@ -107,28 +107,6 @@ type Database struct {
 	writeOptions *pebble.WriteOptions
 }
 
-// func getDirSizeInMB(path string) (int, error) {
-//     var dirSize int64
-
-//     // Walk through all files in the directory
-//     err := filepath.Walk(path, func(_ string, info os.FileInfo, err error) error {
-//         if err != nil {
-//             return err
-//         }
-
-//         // Add the file size (ignores directories themselves)
-//         if !info.IsDir() {
-//             dirSize += info.Size()
-//         }
-//         return nil
-//     })
-
-//     // Convert bytes to megabytes (1MB = 1024 * 1024 bytes)
-//     dirSizeInMB := int(dirSize / (1024 * 1024))
-
-//     return dirSizeInMB, err
-// }
-
 func getDiskUsage(path string) (total uint64, free uint64, used uint64, usage float64, err error) {
 	fs := syscall.Statfs_t{}
 	err = syscall.Statfs(path, &fs)
@@ -155,8 +133,9 @@ func getPebbleDBSizeInMB(db *pebble.DB) (int, error) {
 func (db *Database) loadAllKeysIntoCache() error {
 	iter,_ := db.hotDb.NewIter(nil)
 	defer iter.Close()
+	fmt.Println("Loading all keys into cache")
 
-	for iter.First(); iter.Valid(); iter.Next() {
+	for iter.Next() {
 		key := iter.Key()
 		// value := iter.Value()
 		db.hotCache.Push(key)
