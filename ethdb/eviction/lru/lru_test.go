@@ -2,88 +2,73 @@ package lru
 
 import (
 	"testing"
+
+	"github.com/stretchr/testify/assert"
 )
 
 func TestLRU(t *testing.T) {
 	l := New()
-	if !l.Push([]byte("test1")) {
-		t.Error("Error")
-	}
+	success := l.Push([]byte("test1"), 1)
+	assert.True(t, success)
 
-	if !l.Push([]byte("test2")) {
-		t.Error("Error")
-	}
+	success = l.Push([]byte("test2"), 2)
+	assert.True(t, success)
 
-	if !l.Push([]byte("test3")) {
-		t.Error("Error")
-	}
+	success = l.Push([]byte("test3"), 3)
+	assert.True(t, success)
 
-	if l.Push([]byte("test3")) {
-		t.Error("Error")
-	}
+	len := l.Len()
+	assert.Equal(t, len, 3)
 
-	if l.Delete([]byte("test4")) {
-		t.Error("Error")
-	}
-	if !l.Delete([]byte("test2")) {
-		t.Error("Error")
-	}
+	success = l.Push([]byte("test3"), 30)
+	assert.False(t, success)
+
+	len = l.Len()
+	assert.Equal(t, len, 3)
+
+	success, _ = l.Delete([]byte("test4"))
+	assert.False(t, success)
+
+	success, size := l.Delete([]byte("test2"))
+	assert.True(t, success)
+	assert.Equal(t, 2, size)
+
+	len = l.Len()
+	assert.Equal(t, len, 2)
 
 	key, success := l.SelectVictim()
-	if !success {
-		t.Error("Error")
-	}
-	if string(key) != "test1" {
-		t.Error("Error")
-	}
-	if !l.Access([]byte("test1")) {
-		t.Error("Error")
-	}
+	assert.True(t, success)
+	assert.Equal(t, string(key), "test1")
 
-	if l.Access([]byte("test4")) {
-		t.Error("Error")
-	}
+	success = l.Access([]byte("test1"))
+	assert.True(t, success)
+
+	success = l.Access([]byte("test4"))
+	assert.False(t, success)
 
 	key, success = l.SelectVictim()
-	if !success {
-		t.Error("Error")
-	}
-	if string(key) != "test3" {
-		t.Error("Error")
-	}
-	key, success = l.Pop()
-	if !success {
-		t.Error("Error")
-	}
+	assert.True(t, success)
+	assert.Equal(t, string(key), "test3")
 
-	if string(key) != "test3" {
-		t.Error("Error")
-	}
+	key, success, size = l.Pop()
+	assert.True(t, success)
+	assert.Equal(t, string(key), "test3")
+	assert.Equal(t, size, 30)
 
-	key, success = l.Pop()
-	if !success {
-		t.Error("Error")
-	}
+	key, success, size = l.Pop()
+	assert.True(t, success)
+	assert.Equal(t, string(key), "test1")
+	assert.Equal(t, size, 1)
 
-	if string(key) != "test1" {
-		t.Error("Error")
-	}
-
-	key, success = l.Pop()
-	if success {
-		t.Error("Error")
-	}
-
-	if key != nil {
-		t.Error("Error")
-	}
+	key, success, size = l.Pop()
+	assert.False(t, success)
+	assert.Nil(t, key)
+	assert.Equal(t, size, 0)
 
 	key, success = l.SelectVictim()
-	if success {
-		t.Error("Error")
-	}
+	assert.False(t, success)
+	assert.Nil(t, key)
 
-	if key != nil {
-		t.Error("Error")
-	}
+	len = l.Len()
+	assert.Equal(t, len, 0)
 }
