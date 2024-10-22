@@ -33,7 +33,7 @@ import (
 	"github.com/cockroachdb/pebble/bloom"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/ethdb"
-	"github.com/ethereum/go-ethereum/ethdb/eviction/lru"
+	// "github.com/ethereum/go-ethereum/ethdb/eviction/lru"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/metrics"
 )
@@ -56,20 +56,21 @@ const (
 	degradationWarnInterval = time.Minute
 )
 
-var overThresholdFlag = false
-
 const path = "."
 
 // Database is a persistent key-value store based on the pebble storage engine.
 // Apart from basic data storage functionality it also supports batch writes and
 // iterating over the keyspace in binary-alphabetical order.
 type Database struct {
-	hotFn        string     // filename for reporting
-	coldFn       string     // filename for reporting
-	hotDb        *pebble.DB // Underlying pebble storage engine
+	hotFn        string     
+	coldFn       string
+	timeFn       string  
+	cacheFn     string   
+	hotDb        *pebble.DB 
 	coldDb       *pebble.DB
+	timeDb 	 *pebble.DB
+	cacheDb    *pebble.DB
 	ssdThreshold int
-	hotCache     *lru.Eviction
 
 	compTimeMeter       metrics.Meter // Meter for measuring the total time spent in database compaction
 	compReadMeter       metrics.Meter // Meter for measuring the data read during compaction
@@ -120,25 +121,6 @@ func getDiskUsage(path string) (total uint64, free uint64, used uint64, usage fl
 	usage = (float64(used) / float64(total)) * 100
 
 	return
-}
-
-
-// 모든 키를 hotDb에서 읽어와 hotCache에 저장하는 함수
-func (db *Database) loadAllKeysIntoCache() error {
-	iter,_ := db.hotDb.NewIter(nil)
-	defer iter.Close()
-	fmt.Println("Loading all keys into cache")
-
-	for iter.Next() {
-		key := iter.Key()
-		// value := iter.Value()
-		db.hotCache.Push(key)
-	}
-
-	if err := iter.Error(); err != nil {
-		return err
-	}
-	return nil
 }
 
 func (d *Database) onCompactionBegin(info pebble.CompactionInfo) {
@@ -218,6 +200,8 @@ func New(ssdThreshold int, file1, file2 string, cache int, handles int, namespac
 	// including a frozen memory table and another live one.
 	memTableLimit := 2
 	memTableSize := cache * 1024 * 1024 / 2 / memTableLimit
+	file3 := file1 + "time"
+	file4 := file1 + "cache"
 
 	// The memory table size is currently capped at maxMemTableSize-1 due to a
 	// known bug in the pebble where maxMemTableSize is not recognized as a
@@ -231,11 +215,12 @@ func New(ssdThreshold int, file1, file2 string, cache int, handles int, namespac
 	db := &Database{
 		hotFn:        file1,
 		coldFn:       file2,
+		timeFn:       file3,
+		cacheFn:     file4,
 		ssdThreshold: ssdThreshold,
 		log:          logger,
 		quitChan:     make(chan chan error),
 		writeOptions: &pebble.WriteOptions{Sync: !ephemeral},
-		hotCache:     lru.New(),
 	}
 	opt := &pebble.Options{
 		// Pebble has a single combined cache area and the write
@@ -289,14 +274,21 @@ func New(ssdThreshold int, file1, file2 string, cache int, handles int, namespac
 		return nil, err
 	}
 	db.hotDb = innerDB1
-	if err := db.loadAllKeysIntoCache(); err != nil {
-		return nil, err
-	}
 	innerDB2, err := pebble.Open(file2, opt)
 	if err != nil {
 		return nil, err
 	}
 	db.coldDb = innerDB2
+	innerDB3, err := pebble.Open(file3, opt)
+	if err != nil {
+		return nil, err
+	}
+	db.timeDb = innerDB3
+	innerDB4, err := pebble.Open(file4, opt)
+	if err != nil {
+		return nil, err
+	}
+	db.cacheDb = innerDB4
 
 	db.compTimeMeter = metrics.GetOrRegisterMeter(namespace+"compact/time", nil)
 	db.compReadMeter = metrics.GetOrRegisterMeter(namespace+"compact/input", nil)
@@ -337,18 +329,25 @@ func (d *Database) Close() error {
 	}
 	err1 := d.hotDb.Close()
 	err2 := d.coldDb.Close()
+	err3 := d.timeDb.Close()
+	err4 := d.cacheDb.Close()
 	if err1 != nil {
 		return err1
 	}
 	if err2 != nil {
 		return err2
 	}
+	if err3 != nil {
+		return err3
+	}
+	if err4 != nil {
+		return err4
+	}
 	return nil
 }
 
 // Has retrieves if a key is present in the key-value store.
 func (d *Database) Has(key []byte) (bool, error) {
-	// fmt.Printf("h:k: %X\n", key)
 	d.quitLock.RLock()
 	defer d.quitLock.RUnlock()
 	if d.closed {
@@ -363,89 +362,103 @@ func (d *Database) Has(key []byte) (bool, error) {
 		} else if err != nil {
 			return false, err
 		}
-		d.hotCache.Push(key)
-		value, err := d.GetCold(key)
+		_, err = d.GetCold(key)
 		if err != nil {
 			return false, err
 		}
-		d.Put(key, value)
 		defer closer.Close()
 		return true, nil
 	} else if err != nil {
 		return false, err
 	}
-	d.hotCache.Access(key)
 	closer.Close()
 	return true, nil
 }
 
 // Get retrieves the given key if it's present in the key-value store.
 func (d *Database) Get(key []byte) ([]byte, error) {
-	// fmt.Printf("g:k: %X\n", key)
 	d.quitLock.RLock()
 	defer d.quitLock.RUnlock()
 	if d.closed {
 		return nil, pebble.ErrClosed
 	}
-	dat, closer, err := d.hotDb.Get(key)
-	if err != nil {
-		// check cold db if key is not found in hot db
-		dat, closer, err := d.coldDb.Get(key)
+	// Helper function to retrieve data from a specific database
+	getData := func(db *pebble.DB) ([]byte, error) {
+		dat, closer, err := db.Get(key)
 		if err != nil {
 			return nil, err
 		}
+		defer closer.Close()
+
+		// Copy data to ensure safety when the closer is closed
 		ret := make([]byte, len(dat))
 		copy(ret, dat)
-		closer.Close()
 		return ret, nil
 	}
-	ret := make([]byte, len(dat))
-	copy(ret, dat)
-	closer.Close()
-	return ret, nil
+
+	// Try to get the key from hotDb first
+	data, err := getData(d.hotDb)
+	if err != nil {
+		// If not found in hotDb, check coldDb
+		data, err = getData(d.coldDb)
+		if err != nil {
+			// Return error if key is not found in both
+			return nil, err
+		}
+	}
+	return data, nil
 }
 
 // Put inserts the given value into the key-value store.
 func (d *Database) Put(key []byte, value []byte) error {
-	// fmt.Printf("p:k: %X v: %d\n", key, int(unsafe.Sizeof(value)))
-	// debug.PrintStack()
 	d.quitLock.RLock()
 	defer d.quitLock.RUnlock()
 	if d.closed {
 		return pebble.ErrClosed
 	}
-
-	_, _, _, usage, err := getDiskUsage(path)
-	if err != nil {
-		fmt.Println("Error:", err)
-		return err
-	}
-	// fmt.Printf("Total: %d bytes\nFree: %d bytes\nUsed: %d bytes\nUsage: %.2f%%\n", total, free, used, usage)
-
-	if usage >= float64(d.ssdThreshold) {
-		overThresholdFlag = true
-	} else {
-		overThresholdFlag = false
-	}
-
-	if overThresholdFlag {
-		// lru.eviction
-		// handling empty cache
-		if d.hotCache.Len() == 0 {
-			return d.coldDb.Set(key, value, d.writeOptions)
+	fmt.Println("Put")
+	for _, _, _, usage, err := getDiskUsage(path); ; {
+		if err != nil {
+			fmt.Println("Error:", err)
+			return err
 		}
-		key, success := d.hotCache.SelectVictim()
-		if success {
-			if d.hotCache.Delete(key) {
-				return d.coldDb.Set(key, value, d.writeOptions)
+		fmt.Printf("Usage: %.2f%%\n", usage)
+		if usage < float64(d.ssdThreshold) {
+			break
+		}
+
+		// get oldest time key from timeDb
+		iter, _ := d.timeDb.NewIter(nil)
+		defer iter.Close()
+		if !iter.First(){
+			fmt.Println("timeDb is empty")
+			break
+		}
+		timeFromTimeDb := iter.Key()
+		keyFromTimeDb := iter.Value()
+
+		// get value from cacheDb
+		value, closer, err := d.cacheDb.Get(keyFromTimeDb)
+		if err != nil {
+			fmt.Println("deleted key")
+			continue
+		}
+		closer.Close()
+		// delete time key
+		if err := d.timeDb.Delete(timeFromTimeDb, d.writeOptions); err != nil {
+			return err
+		}
+		// compare time keys and delete value key from hotDb
+		if bytes.Equal(value, timeFromTimeDb){
+			if err := d.hotDb.Delete(keyFromTimeDb, d.writeOptions); err != nil {
+				return err
 			}
 		}
-		return fmt.Errorf("No key to evict")
-	} else {
-		d.hotCache.Push(key)
-		return d.hotDb.Set(key, value, d.writeOptions)
 	}
-
+	timeByte := []byte(fmt.Sprintf("%d", time.Now().Unix()))
+	d.timeDb.Set(timeByte, key, d.writeOptions)
+	d.cacheDb.Set(key, timeByte, d.writeOptions)
+	return d.hotDb.Set(key, value, d.writeOptions)
 }
 
 func (d *Database) GetCold(key []byte) ([]byte, error) {
@@ -464,46 +477,6 @@ func (d *Database) GetCold(key []byte) ([]byte, error) {
 	return ret, nil
 }
 
-// Put inserts the given value into the key-value store.
-func (d *Database) PutForTest(key []byte, value []byte) error {
-	d.quitLock.RLock()
-	defer d.quitLock.RUnlock()
-	if d.closed {
-		return pebble.ErrClosed
-	}
-	// total, free, used, usage, err := getDiskUsage(path)
-	_, _, _, usage, err := getDiskUsage(path)
-	if err != nil {
-		fmt.Println("Error:", err)
-		return err
-	}
-	// fmt.Printf("Usage: %.2f%%\nThreshold: %d%%\n", usage, d.ssdThreshold)
-
-	if usage >= float64(d.ssdThreshold) {
-		overThresholdFlag = true
-	} else {
-		overThresholdFlag = false
-	}
-
-	if overThresholdFlag {
-		// lru.eviction
-		// handling empty cache
-		if d.hotCache.Len() == 0 {
-			return d.coldDb.Set(key, value, d.writeOptions)
-		}
-		key, success := d.hotCache.SelectVictim()
-		if success {
-			if d.hotCache.Delete(key) {
-				return d.coldDb.Set(key, value, d.writeOptions)
-			}
-		}
-		return fmt.Errorf("No key to evict")
-	} else {
-		d.hotCache.Push(key)
-		return d.hotDb.Set(key, value, d.writeOptions)
-	}
-}
-
 // Delete removes the key from the key-value store.
 func (d *Database) Delete(key []byte) error {
 	// fmt.Printf("d:k: %X\n", key)
@@ -512,15 +485,10 @@ func (d *Database) Delete(key []byte) error {
 	if d.closed {
 		return pebble.ErrClosed
 	}
-	err := d.hotDb.Delete(key, d.writeOptions)
-	if err != nil {
-		return err
-	}
-	d.hotCache.Delete(key)
-	if err := d.coldDb.Delete(key, d.writeOptions); err != nil {
-		return err
-	}
-	return nil
+	d.hotDb.Delete(key, d.writeOptions)
+	d.timeDb.Delete(key, d.writeOptions)
+	d.cacheDb.Delete(key, d.writeOptions)
+	return d.coldDb.Delete(key, d.writeOptions)
 }
 
 // NewBatch creates a write-only key-value store that buffers changes to its host
@@ -659,16 +627,41 @@ func (d *Database) Compact(start []byte, limit []byte) error {
 		limit = bytes.Repeat([]byte{0xff}, 32)
 	}
 	// TODO: Parallelization Compaction?
-	// Compact both hot and cold databases
-	if err := d.hotDb.Compact(start, limit, true); err != nil {
-		return err
-	}
+	var wg sync.WaitGroup
+    var mu sync.Mutex
 
-	if err := d.coldDb.Compact(start, limit, true); err != nil {
-		return err
-	}
+    var err error
 
-	return nil
+    compactDb := func(db *pebble.DB) {
+        defer wg.Done()
+        if e := db.Compact(start, limit, true); e != nil {
+            mu.Lock()
+            if err == nil {
+                err = e
+            }
+            mu.Unlock()
+        }
+    }
+
+    wg.Add(1)
+    go compactDb(d.hotDb)
+
+    wg.Add(1)
+    go compactDb(d.coldDb)
+
+    wg.Add(1)
+    go compactDb(d.timeDb)
+
+    wg.Add(1)
+    go compactDb(d.cacheDb)
+
+    wg.Wait()
+
+    if err != nil {
+        return err
+    }
+
+    return nil
 }
 
 // Path returns the path to the database directory.
@@ -793,27 +786,25 @@ type batch struct {
 	bCold  *pebble.Batch
 	db     *Database
 	size   int
-	opList []string
+	keyList [][]byte
 }
 
 // Put inserts the given value into the batch for later committing.
 func (b *batch) Put(key, value []byte) error {
-	//linas
-	// fmt.Printf("bp:k: %X v: %d\n", key, int(unsafe.Sizeof(value)))
-	// debug.PrintStack()
-	b.bHot.Set(key, value, nil)
+	// TODO: put cold if hotDb is full
+	// timeByte := []byte(fmt.Sprintf("%d", time.Now().Unix()))
+	// timePut = append(value, timeByte...)
+	b.bHot.Set(key, timePut, nil)
 	b.size += len(key) + len(value)
-	b.opList = append(b.opList, "A"+string(key))
+	b.keyList = append(b.keyList, key)
 	return nil
 }
 
 // Delete inserts the key removal into the batch for later committing.
 func (b *batch) Delete(key []byte) error {
-	// fmt.Printf("bd:k: %X\n", key)
 	b.bHot.Delete(key, nil)
 	b.bCold.Delete(key, nil)
 	b.size += len(key)
-	b.opList = append(b.opList, "D"+string(key))
 	return nil
 }
 
@@ -838,49 +829,49 @@ func (b *batch) Write() error {
 		fmt.Println("dbCold Batch Write Error:", err)
 		return err
 	}
-
-	for _, op_key := range b.opList {
-		op := op_key[0]
-		key := op_key[1:]
-		if op == 'A' {
-			b.db.hotCache.Push([]byte(key))
-		} else if op == 'D' {
-			b.db.hotCache.Delete([]byte(key))
-		} else {
-			return pebble.ErrInvalidBatch
-		}
+	
+	timeByte := []byte(fmt.Sprintf("%d", time.Now().Unix()))
+	for _, k := range b.keyList {
+		fmt.Printf("write op_key: %X\n", k)
+		b.db.timeDb.Set(timeByte, k, b.db.writeOptions)
+		b.db.cacheDb.Set(k, timeByte, b.db.writeOptions)
 	}
 
-	// Eviction until being under threashold
 	for _, _, _, usage, err := getDiskUsage(path); ; {
 		if err != nil {
 			fmt.Println("Error:", err)
 			return err
 		}
-
-		if usage >= float64(b.db.ssdThreshold) {
-			key, success := b.db.hotCache.SelectVictim()
-			if success {
-				if dat, closer, err := b.db.hotDb.Get(key); err == nil {
-					if err := b.db.coldDb.Set(key, dat, b.db.writeOptions); err != nil {
-						fmt.Println("batch migration cold DB set error", err)
-					}
-
-					if b.db.hotCache.Delete(key) {
-						fmt.Println("batch migration cache entry delete error")
-					}
-					closer.Close()
-					if err := b.db.hotDb.Delete(key, b.db.writeOptions); err != nil {
-						fmt.Println("batch migration hot DB delete error", err)
-					}
-				} else {
-					fmt.Println("batch migration hot DB get error", err)
-				}
-			} else {
-				fmt.Println("batch migration no victim in cache", err)
-			}
-		} else {
+		fmt.Printf("Usage: %.2f%%\n", usage)
+		if usage < float64(b.db.ssdThreshold) {
 			break
+		}
+
+		// get oldest time key from timeDb
+		iter, _ := b.db.timeDb.NewIter(nil)
+		defer iter.Close()
+		if !iter.First(){
+			fmt.Println("timeDb is empty")
+			break
+		}
+		timeFromTimeDb := iter.Key()
+		keyFromTimeDb := iter.Value()
+
+		// delete time key
+		if err := b.db.timeDb.Delete(timeFromTimeDb, b.db.writeOptions); err != nil {
+			return err
+		}
+		// get value from hotDb
+		value, closer, err := b.db.cacheDb.Get(keyFromTimeDb)
+		if err != nil {
+			return err
+		}
+		closer.Close()
+		// compare time keys and delete value key from hotDb
+		if bytes.Equal(value, timeFromTimeDb){
+			if err := b.db.hotDb.Delete(keyFromTimeDb, b.db.writeOptions); err != nil {
+				return err
+			}
 		}
 	}
 
@@ -891,10 +882,7 @@ func (b *batch) Write() error {
 func (b *batch) Reset() {
 	b.bHot.Reset()
 	b.bCold.Reset()
-	b.bHot.Reset()
-	b.bCold.Reset()
 	b.size = 0
-	b.opList = nil
 	b.opList = nil
 }
 

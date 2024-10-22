@@ -5,10 +5,19 @@ import (
 	"testing"
 	"fmt"
 	"github.com/stretchr/testify/assert"
+	"crypto/rand"
 )
-
+// generateRandomBytes creates a random byte slice of a given length
+func generateRandomBytes(length int) []byte {
+	b := make([]byte, length)
+	_, err := rand.Read(b)
+	if err != nil {
+		panic(fmt.Sprintf("Failed to generate random bytes: %v", err))
+	}
+	return b
+}
 func TestNew(t *testing.T) {
-	ssdThreshold := 0
+	ssdThreshold := 1
 	dbFile1 := "test_db1"
 	dbFile2 := "test_db2"
 	cacheSize := 64
@@ -31,7 +40,7 @@ func TestNew(t *testing.T) {
 
 func TestOverThreshold(t *testing.T) {
 	fmt.Println("==============TestOverThreshold==============")
-	ssdThreshold :=0
+	ssdThreshold :=1
 	dbFile1 := "test_db1"
 	dbFile2 := "test_db2"
 	cacheSize := 64
@@ -56,11 +65,11 @@ func TestOverThreshold(t *testing.T) {
 
 	// Test Put with an empty database
 	fmt.Println("# Put key1, key4, key6 in cold db")
-	err = db.PutForTest([]byte("key1"), []byte("cold1"))
+	err = db.Put([]byte("key1"), []byte("cold1"))
 	assert.NoError(t, err, "Failed to put key in database")
-	err = db.PutForTest([]byte("key4"), []byte("cold4"))
+	err = db.Put([]byte("key4"), []byte("cold4"))
 	assert.NoError(t, err, "Failed to put key in database")
-	err = db.PutForTest([]byte("key6"), []byte("cold6"))
+	err = db.Put([]byte("key6"), []byte("cold6"))
 	assert.NoError(t, err, "Failed to put key in database")
 
 	// Test Get with a database having the key
@@ -148,7 +157,21 @@ func TestOverThreshold(t *testing.T) {
 	b.Reset()
 	b.Replay(db)
 
-	
+	numRecords := 10000 // Adjust this number as needed to increase size
+	keySize := 16         // Size of each key in bytes
+	valueSize := 1024     // Size of each value in bytes
+	for i := 0; i < numRecords; i++ {
+		// Generate a random key and value
+		key := generateRandomBytes(keySize)
+		value := generateRandomBytes(valueSize)
+
+		// Insert the key-value pair into the batch
+		err = db.Put(key, value)
+		if err != nil {
+			t.Fatalf("Failed to put key in database: %v", err)
+		}
+	}
+
 	db.Close()
 }
 
@@ -185,7 +208,7 @@ func TestUnderThreshold(t *testing.T) {
 
 	// Test Put with an empty database
 	fmt.Println("# Put key1")
-	err = db.PutForTest([]byte("key1"), []byte("value1"))
+	err = db.Put([]byte("key1"), []byte("value1"))
 	assert.NoError(t, err, "Failed to put key in database")
 
 	// Test Get with a database having the key
