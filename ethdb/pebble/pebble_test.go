@@ -17,7 +17,7 @@ func generateRandomBytes(length int) []byte {
 	return b
 }
 func TestNew(t *testing.T) {
-	ssdThreshold := 1
+	ssdThreshold := 50
 	dbFile1 := "test_db1"
 	dbFile2 := "test_db2"
 	cacheSize := 64
@@ -40,7 +40,7 @@ func TestNew(t *testing.T) {
 
 func TestOverThreshold(t *testing.T) {
 	fmt.Println("==============TestOverThreshold==============")
-	ssdThreshold :=1
+	ssdThreshold :=50
 	dbFile1 := "test_db1"
 	dbFile2 := "test_db2"
 	cacheSize := 64
@@ -157,9 +157,9 @@ func TestOverThreshold(t *testing.T) {
 	b.Reset()
 	b.Replay(db)
 
-	numRecords := 10000 // Adjust this number as needed to increase size
-	keySize := 16         // Size of each key in bytes
-	valueSize := 1024     // Size of each value in bytes
+	numRecords := 500 // Adjust this number as needed to increase size
+	keySize := 32         // Size of each key in bytes
+	valueSize := 100000000     // Size of each value in bytes
 	for i := 0; i < numRecords; i++ {
 		// Generate a random key and value
 		key := generateRandomBytes(keySize)

@@ -56,7 +56,7 @@ const (
 	degradationWarnInterval = time.Minute
 )
 
-const path = "."
+var path = "."
 
 // Database is a persistent key-value store based on the pebble storage engine.
 // Apart from basic data storage functionality it also supports batch writes and
@@ -64,12 +64,8 @@ const path = "."
 type Database struct {
 	hotFn        string     
 	coldFn       string
-	timeFn       string  
-	cacheFn     string   
 	hotDb        *pebble.DB 
 	coldDb       *pebble.DB
-	timeDb 	 *pebble.DB
-	cacheDb    *pebble.DB
 	ssdThreshold int
 
 	compTimeMeter       metrics.Meter // Meter for measuring the total time spent in database compaction
@@ -106,6 +102,8 @@ type Database struct {
 	writeDelayTime      atomic.Int64 // Total time spent in write stalls
 
 	writeOptions *pebble.WriteOptions
+
+	kvCnt atomic.Int64
 }
 
 func getDiskUsage(path string) (total uint64, free uint64, used uint64, usage float64, err error) {
@@ -200,8 +198,6 @@ func New(ssdThreshold int, file1, file2 string, cache int, handles int, namespac
 	// including a frozen memory table and another live one.
 	memTableLimit := 2
 	memTableSize := cache * 1024 * 1024 / 2 / memTableLimit
-	file3 := file1 + "time"
-	file4 := file1 + "cache"
 
 	// The memory table size is currently capped at maxMemTableSize-1 due to a
 	// known bug in the pebble where maxMemTableSize is not recognized as a
@@ -215,8 +211,6 @@ func New(ssdThreshold int, file1, file2 string, cache int, handles int, namespac
 	db := &Database{
 		hotFn:        file1,
 		coldFn:       file2,
-		timeFn:       file3,
-		cacheFn:     file4,
 		ssdThreshold: ssdThreshold,
 		log:          logger,
 		quitChan:     make(chan chan error),
@@ -279,16 +273,8 @@ func New(ssdThreshold int, file1, file2 string, cache int, handles int, namespac
 		return nil, err
 	}
 	db.coldDb = innerDB2
-	innerDB3, err := pebble.Open(file3, opt)
-	if err != nil {
-		return nil, err
-	}
-	db.timeDb = innerDB3
-	innerDB4, err := pebble.Open(file4, opt)
-	if err != nil {
-		return nil, err
-	}
-	db.cacheDb = innerDB4
+
+	path = file1
 
 	db.compTimeMeter = metrics.GetOrRegisterMeter(namespace+"compact/time", nil)
 	db.compReadMeter = metrics.GetOrRegisterMeter(namespace+"compact/input", nil)
@@ -329,20 +315,13 @@ func (d *Database) Close() error {
 	}
 	err1 := d.hotDb.Close()
 	err2 := d.coldDb.Close()
-	err3 := d.timeDb.Close()
-	err4 := d.cacheDb.Close()
 	if err1 != nil {
 		return err1
 	}
 	if err2 != nil {
 		return err2
 	}
-	if err3 != nil {
-		return err3
-	}
-	if err4 != nil {
-		return err4
-	}
+
 	return nil
 }
 
@@ -382,83 +361,121 @@ func (d *Database) Get(key []byte) ([]byte, error) {
 	if d.closed {
 		return nil, pebble.ErrClosed
 	}
-	// Helper function to retrieve data from a specific database
-	getData := func(db *pebble.DB) ([]byte, error) {
-		dat, closer, err := db.Get(key)
+	dat, closer, err := d.hotDb.Get(key)
+	if err != nil {
+		// check cold db if key is not found in hot db
+		dat, closer, err := d.coldDb.Get(key)
 		if err != nil {
 			return nil, err
 		}
-		defer closer.Close()
-
-		// Copy data to ensure safety when the closer is closed
 		ret := make([]byte, len(dat))
 		copy(ret, dat)
+		closer.Close()
 		return ret, nil
 	}
-
-	// Try to get the key from hotDb first
-	data, err := getData(d.hotDb)
-	if err != nil {
-		// If not found in hotDb, check coldDb
-		data, err = getData(d.coldDb)
-		if err != nil {
-			// Return error if key is not found in both
-			return nil, err
-		}
-	}
-	return data, nil
+	ret := make([]byte, len(dat)-10)
+	dat = dat[:len(dat)-10]
+	copy(ret, dat)
+	closer.Close()
+	return ret, nil
 }
 
-// Put inserts the given value into the key-value store.
+func (d *Database) GetTime(key []byte) ([]byte, error) {
+	d.quitLock.RLock()
+	defer d.quitLock.RUnlock()
+	if d.closed {
+		return nil, pebble.ErrClosed
+	}
+	dat, closer, err := d.hotDb.Get(key)
+	if err != nil {
+		return nil, err
+	}
+	ret := make([]byte, 10)
+	dat = dat[len(dat)-10:]
+	copy(ret, dat)
+	closer.Close()
+	return ret, nil
+}
+
+func (d *Database) GetAll(key []byte) ([]byte, error) {
+	d.quitLock.RLock()
+	defer d.quitLock.RUnlock()
+	if d.closed {
+		return nil, pebble.ErrClosed
+	}
+	dat, closer, err := d.hotDb.Get(key)
+	if err != nil {
+		return nil, err
+	}
+	ret := make([]byte, len(dat))
+	copy(ret, dat)
+	closer.Close()
+	return ret, nil
+}
+
 func (d *Database) Put(key []byte, value []byte) error {
 	d.quitLock.RLock()
 	defer d.quitLock.RUnlock()
 	if d.closed {
 		return pebble.ErrClosed
 	}
-	fmt.Println("Put")
-	for _, _, _, usage, err := getDiskUsage(path); ; {
-		if err != nil {
-			fmt.Println("Error:", err)
-			return err
-		}
-		fmt.Printf("Usage: %.2f%%\n", usage)
-		if usage < float64(d.ssdThreshold) {
-			break
-		}
+	
+	if d.kvCnt.Load() >= int64(d.ssdThreshold*9/10){
+		iter := d.NewIterator([]byte("t:"), nil).(*pebbleIterator)
+		defer iter.Release()
+		batch := d.hotDb.NewBatch()
+		defer batch.Close()
 
-		// get oldest time key from timeDb
-		iter, _ := d.timeDb.NewIter(nil)
-		defer iter.Close()
-		if !iter.First(){
-			fmt.Println("timeDb is empty")
-			break
-		}
-		timeFromTimeDb := iter.Key()
-		keyFromTimeDb := iter.Value()
+		for i:=0; i<d.ssdThreshold/10; i++ {			
+			// get oldest time key from hotDb
+			if !iter.Next() {
+				fmt.Println("time record is empty")
+				break
+			}
 
-		// get value from cacheDb
-		value, closer, err := d.cacheDb.Get(keyFromTimeDb)
-		if err != nil {
-			fmt.Println("deleted key")
-			continue
-		}
-		closer.Close()
-		// delete time key
-		if err := d.timeDb.Delete(timeFromTimeDb, d.writeOptions); err != nil {
-			return err
-		}
-		// compare time keys and delete value key from hotDb
-		if bytes.Equal(value, timeFromTimeDb){
-			if err := d.hotDb.Delete(keyFromTimeDb, d.writeOptions); err != nil {
+			timeStamp := iter.Key()
+			keyFromTimeDb := iter.ValueTime()
+			if err := batch.Delete(timeStamp, d.writeOptions); err != nil {
 				return err
 			}
+
+			// get value from hotDb
+			valueTime, err := d.GetAll(keyFromTimeDb)
+			if err != nil {
+				fmt.Println("deleted key")
+				continue
+			}
+			timeFromHot := valueTime[len(valueTime)-10:]
+			valueFromHot := valueTime[:len(valueTime)-10]
+
+			// compare time keys and delete value key from hotDb
+			if bytes.Equal(timeFromHot, timeStamp[2:]) {
+				if err := batch.Delete(keyFromTimeDb, d.writeOptions); err != nil {
+					return err
+				}
+				d.coldDb.Set(keyFromTimeDb, valueFromHot, d.writeOptions)
+				fmt.Printf("%X is moved to coldDb\n", keyFromTimeDb)
+			}
 		}
+		
+		if err := batch.Commit(d.writeOptions); err != nil {
+			return err
+		}
+		d.kvCnt.Add(-int64(d.ssdThreshold/10))
+		fmt.Println("kvCnt After Eviction :", d.kvCnt.Load())
 	}
+	
+
 	timeByte := []byte(fmt.Sprintf("%d", time.Now().Unix()))
-	d.timeDb.Set(timeByte, key, d.writeOptions)
-	d.cacheDb.Set(key, timeByte, d.writeOptions)
-	return d.hotDb.Set(key, value, d.writeOptions)
+	if len(timeByte) != 10 {
+		return fmt.Errorf("len(timeByte): %d", len(timeByte))
+	}
+	timeKey := append([]byte("t:"), timeByte...)
+	d.hotDb.Set(timeKey, key, d.writeOptions)
+	valueTime := append(value, timeByte...)
+	d.kvCnt.Add(1)
+
+	return d.hotDb.Set(key, valueTime, d.writeOptions)
 }
 
 func (d *Database) GetCold(key []byte) ([]byte, error) {
@@ -479,15 +496,13 @@ func (d *Database) GetCold(key []byte) ([]byte, error) {
 
 // Delete removes the key from the key-value store.
 func (d *Database) Delete(key []byte) error {
-	// fmt.Printf("d:k: %X\n", key)
 	d.quitLock.RLock()
 	defer d.quitLock.RUnlock()
 	if d.closed {
 		return pebble.ErrClosed
 	}
 	d.hotDb.Delete(key, d.writeOptions)
-	d.timeDb.Delete(key, d.writeOptions)
-	d.cacheDb.Delete(key, d.writeOptions)
+	d.hotDb.Delete(append([]byte("t:"),key...), d.writeOptions)
 	return d.coldDb.Delete(key, d.writeOptions)
 }
 
@@ -555,7 +570,7 @@ func (snap *snapshot) hasInSnapshot(snapDb *pebble.Snapshot, key []byte) (bool, 
 func (snap *snapshot) Get(key []byte) ([]byte, error) {
 	// Try to get from hot snapshot
 	if data, err := snap.getFromSnapshot(snap.dbHot, key); err == nil {
-		return data, nil
+		return data[:len(data)-10], nil
 	} else if err != pebble.ErrNotFound {
 		return nil, err
 	}
@@ -648,12 +663,6 @@ func (d *Database) Compact(start []byte, limit []byte) error {
 
     wg.Add(1)
     go compactDb(d.coldDb)
-
-    wg.Add(1)
-    go compactDb(d.timeDb)
-
-    wg.Add(1)
-    go compactDb(d.cacheDb)
 
     wg.Wait()
 
@@ -786,17 +795,27 @@ type batch struct {
 	bCold  *pebble.Batch
 	db     *Database
 	size   int
-	keyList [][]byte
 }
 
 // Put inserts the given value into the batch for later committing.
 func (b *batch) Put(key, value []byte) error {
-	// TODO: put cold if hotDb is full
-	// timeByte := []byte(fmt.Sprintf("%d", time.Now().Unix()))
-	// timePut = append(value, timeByte...)
-	b.bHot.Set(key, timePut, nil)
+	timeByte := []byte(fmt.Sprintf("%d", time.Now().Unix()))
+	if len(timeByte) != 10 {
+		return fmt.Errorf("len(timeByte): %d", len(timeByte))
+	}
+	valueTime := append(value, timeByte...)
+	
+	b.bHot.Set(key, valueTime, nil)
+	timeKey := append([]byte("t:"),timeByte...)
+	b.bHot.Set(timeKey, key, nil)
+	b.size += len(key) + len(valueTime) + len(timeKey) + len(key)
+	b.db.kvCnt.Add(1)
+	return nil
+}
+
+func (b *batch) PutCold(key, value []byte) error {
+	b.bCold.Set(key, value, nil)
 	b.size += len(key) + len(value)
-	b.keyList = append(b.keyList, key)
 	return nil
 }
 
@@ -829,50 +848,50 @@ func (b *batch) Write() error {
 		fmt.Println("dbCold Batch Write Error:", err)
 		return err
 	}
-	
-	timeByte := []byte(fmt.Sprintf("%d", time.Now().Unix()))
-	for _, k := range b.keyList {
-		fmt.Printf("write op_key: %X\n", k)
-		b.db.timeDb.Set(timeByte, k, b.db.writeOptions)
-		b.db.cacheDb.Set(k, timeByte, b.db.writeOptions)
+	kvcnt := b.db.kvCnt.Load()
+	fmt.Println("kvCnt :", kvcnt)
+	if kvcnt < int64(b.db.ssdThreshold*9/10){
+		return nil
 	}
 
-	for _, _, _, usage, err := getDiskUsage(path); ; {
-		if err != nil {
-			fmt.Println("Error:", err)
-			return err
-		}
-		fmt.Printf("Usage: %.2f%%\n", usage)
-		if usage < float64(b.db.ssdThreshold) {
+	// get oldest time key from hotDb
+	iter := b.db.NewIterator([]byte("t:"), nil).(*pebbleIterator)
+	defer iter.Release()
+	batch := b.db.hotDb.NewBatch()
+	defer batch.Close()
+		
+	for i:=0; i<b.db.ssdThreshold/10; i++ {
+		if !iter.Next(){
+			fmt.Println("time record is empty")
 			break
 		}
+		timeStamp := iter.Key()
+		keyFromTimeDb := iter.ValueTime()
 
-		// get oldest time key from timeDb
-		iter, _ := b.db.timeDb.NewIter(nil)
-		defer iter.Close()
-		if !iter.First(){
-			fmt.Println("timeDb is empty")
-			break
-		}
-		timeFromTimeDb := iter.Key()
-		keyFromTimeDb := iter.Value()
-
-		// delete time key
-		if err := b.db.timeDb.Delete(timeFromTimeDb, b.db.writeOptions); err != nil {
+		if err := batch.Delete(timeStamp, b.db.writeOptions); err != nil {
 			return err
 		}
 		// get value from hotDb
-		value, closer, err := b.db.cacheDb.Get(keyFromTimeDb)
+		valueTime, err := b.db.GetAll(keyFromTimeDb)
 		if err != nil {
-			return err
+			fmt.Println("deleted key")
+			continue
 		}
-		closer.Close()
+		timeFromHot := valueTime[len(valueTime)-10:]
+		valueFromHot := valueTime[:len(valueTime)-10]
 		// compare time keys and delete value key from hotDb
-		if bytes.Equal(value, timeFromTimeDb){
-			if err := b.db.hotDb.Delete(keyFromTimeDb, b.db.writeOptions); err != nil {
+		if bytes.Equal(timeFromHot, timeStamp[2:]){
+			if err := batch.Delete(keyFromTimeDb, b.db.writeOptions); err != nil {
 				return err
 			}
+			b.db.coldDb.Set(keyFromTimeDb, valueFromHot, b.db.writeOptions)
+			fmt.Printf("%X is moved to coldDb\n", keyFromTimeDb)
 		}
+	}
+	b.db.kvCnt.Add(-int64(b.db.ssdThreshold/10))
+	fmt.Println("kvCnt After Eviction :", b.db.kvCnt.Load())
+	if err := batch.Commit(b.db.writeOptions); err != nil {
+		return err
 	}
 
 	return nil
@@ -883,7 +902,6 @@ func (b *batch) Reset() {
 	b.bHot.Reset()
 	b.bCold.Reset()
 	b.size = 0
-	b.opList = nil
 }
 
 func (b *batch) Replay(w ethdb.KeyValueWriter) error {
@@ -927,6 +945,7 @@ func replayBatch(batch *pebble.Batch, w ethdb.KeyValueWriter) error {
 type pebbleIterator struct {
 	iterHot      *pebble.Iterator
 	iterCold     *pebble.Iterator
+	iter 		  *pebble.Iterator
 	movedHot     bool
 	movedCold    bool
 	releasedHot  bool
@@ -934,6 +953,8 @@ type pebbleIterator struct {
 	validHot     bool
 	validCold    bool
 	turnHot      bool
+	moved        bool
+	released     bool
 }
 
 // NewIterator creates a binary-alphabetical iterator over a subset
@@ -953,6 +974,8 @@ func (d *Database) NewIterator(prefix []byte, start []byte) ethdb.Iterator {
 	return &pebbleIterator{
 		iterHot:      iterHot,
 		iterCold:     iterCold,
+		moved: 	  true,
+		released: false,
 		movedHot:     true,
 		movedCold:    true,
 		releasedHot:  false,
@@ -1060,13 +1083,20 @@ func (iter *pebbleIterator) KeyCold() []byte {
 // may change on the next call to Next.
 func (iter *pebbleIterator) Value() []byte {
 	if iter.turnHot {
-		return iter.iterHot.Value()
+		val:= iter.iterHot.Value()
+		return val[:len(val)-10]
 	} else {
 		return iter.iterCold.Value()
 	}
 	return nil
 }
 
+func (iter *pebbleIterator) ValueTime() []byte {
+	if iter.turnHot {
+		return iter.iterHot.Value()
+	} 
+	return nil
+}
 // Release releases associated resources. Release should always succeed and can
 // be called multiple times without causing error.
 func (iter *pebbleIterator) Release() {
