@@ -40,7 +40,7 @@ func TestNew(t *testing.T) {
 
 func TestOverThreshold(t *testing.T) {
 	fmt.Println("==============TestOverThreshold==============")
-	ssdThreshold :=50
+	ssdThreshold :=100
 	dbFile1 := "test_db1"
 	dbFile2 := "test_db2"
 	cacheSize := 64

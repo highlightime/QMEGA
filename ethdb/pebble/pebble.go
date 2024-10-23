@@ -335,14 +335,10 @@ func (d *Database) Has(key []byte) (bool, error) {
 	_, closer, err := d.hotDb.Get(key)
 	if err == pebble.ErrNotFound {
 		// check cold db if key is not found in hot db
-		_, closer, err := d.coldDb.Get(key)
+		_, err = d.GetCold(key)
 		if err == pebble.ErrNotFound {
 			return false, nil
 		} else if err != nil {
-			return false, err
-		}
-		_, err = d.GetCold(key)
-		if err != nil {
 			return false, err
 		}
 		defer closer.Close()
@@ -364,8 +360,8 @@ func (d *Database) Get(key []byte) ([]byte, error) {
 	dat, closer, err := d.hotDb.Get(key)
 	if err != nil {
 		// check cold db if key is not found in hot db
-		dat, closer, err := d.coldDb.Get(key)
-		if err != nil {
+		dat, err := d.GetCold(key)
+		if err!= nil {
 			return nil, err
 		}
 		ret := make([]byte, len(dat))
