@@ -25,6 +25,7 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+	"encoding/binary"
 
 	// "unsafe"
 	// "runtime/debug"
@@ -57,6 +58,7 @@ const (
 )
 
 var path = "."
+const timeStampSize = 8
 
 // Database is a persistent key-value store based on the pebble storage engine.
 // Apart from basic data storage functionality it also supports batch writes and
@@ -104,6 +106,7 @@ type Database struct {
 	writeOptions *pebble.WriteOptions
 
 	kvCnt atomic.Int64
+	evictionLock sync.Mutex
 }
 
 func getDiskUsage(path string) (total uint64, free uint64, used uint64, usage float64, err error) {
@@ -366,11 +369,10 @@ func (d *Database) Get(key []byte) ([]byte, error) {
 		}
 		ret := make([]byte, len(dat))
 		copy(ret, dat)
-		closer.Close()
 		return ret, nil
 	}
-	ret := make([]byte, len(dat)-10)
-	dat = dat[:len(dat)-10]
+	ret := make([]byte, len(dat)-timeStampSize)
+	dat = getValueFromVT(dat)
 	copy(ret, dat)
 	closer.Close()
 	return ret, nil
@@ -386,8 +388,8 @@ func (d *Database) GetTime(key []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	ret := make([]byte, 10)
-	dat = dat[len(dat)-10:]
+	ret := make([]byte, timeStampSize)
+	dat = getTimeFromVT(dat)
 	copy(ret, dat)
 	closer.Close()
 	return ret, nil
@@ -410,68 +412,13 @@ func (d *Database) GetAll(key []byte) ([]byte, error) {
 }
 
 func (d *Database) Put(key []byte, value []byte) error {
-	d.quitLock.RLock()
-	defer d.quitLock.RUnlock()
-	if d.closed {
-		return pebble.ErrClosed
+	batch := &batch{
+		bHot:  d.hotDb.NewBatch(),
+		bCold: d.coldDb.NewBatch(),
+		db:    d,
 	}
-	
-	if d.kvCnt.Load() >= int64(d.ssdThreshold*9/10){
-		iter := d.NewIterator([]byte("t:"), nil).(*pebbleIterator)
-		defer iter.Release()
-		batch := d.hotDb.NewBatch()
-		defer batch.Close()
-
-		for i:=0; i<d.ssdThreshold/10; i++ {			
-			// get oldest time key from hotDb
-			if !iter.Next() {
-				fmt.Println("time record is empty")
-				break
-			}
-
-			timeStamp := iter.Key()
-			keyFromTimeDb := iter.ValueTime()
-			if err := batch.Delete(timeStamp, d.writeOptions); err != nil {
-				return err
-			}
-
-			// get value from hotDb
-			valueTime, err := d.GetAll(keyFromTimeDb)
-			if err != nil {
-				fmt.Println("deleted key")
-				continue
-			}
-			timeFromHot := valueTime[len(valueTime)-10:]
-			valueFromHot := valueTime[:len(valueTime)-10]
-
-			// compare time keys and delete value key from hotDb
-			if bytes.Equal(timeFromHot, timeStamp[2:]) {
-				if err := batch.Delete(keyFromTimeDb, d.writeOptions); err != nil {
-					return err
-				}
-				d.coldDb.Set(keyFromTimeDb, valueFromHot, d.writeOptions)
-				fmt.Printf("%X is moved to coldDb\n", keyFromTimeDb)
-			}
-		}
-		
-		if err := batch.Commit(d.writeOptions); err != nil {
-			return err
-		}
-		d.kvCnt.Add(-int64(d.ssdThreshold/10))
-		fmt.Println("kvCnt After Eviction :", d.kvCnt.Load())
-	}
-	
-
-	timeByte := []byte(fmt.Sprintf("%d", time.Now().Unix()))
-	if len(timeByte) != 10 {
-		return fmt.Errorf("len(timeByte): %d", len(timeByte))
-	}
-	timeKey := append([]byte("t:"), timeByte...)
-	d.hotDb.Set(timeKey, key, d.writeOptions)
-	valueTime := append(value, timeByte...)
-	d.kvCnt.Add(1)
-
-	return d.hotDb.Set(key, valueTime, d.writeOptions)
+	batch.Put(key, value)
+	return batch.Write()
 }
 
 func (d *Database) GetCold(key []byte) ([]byte, error) {
@@ -492,14 +439,13 @@ func (d *Database) GetCold(key []byte) ([]byte, error) {
 
 // Delete removes the key from the key-value store.
 func (d *Database) Delete(key []byte) error {
-	d.quitLock.RLock()
-	defer d.quitLock.RUnlock()
-	if d.closed {
-		return pebble.ErrClosed
+	batch := &batch{
+		bHot:  d.hotDb.NewBatch(),
+		bCold: d.coldDb.NewBatch(),
+		db:    d,
 	}
-	d.hotDb.Delete(key, d.writeOptions)
-	d.hotDb.Delete(append([]byte("t:"),key...), d.writeOptions)
-	return d.coldDb.Delete(key, d.writeOptions)
+	batch.Delete(key)
+	return batch.Write()
 }
 
 // NewBatch creates a write-only key-value store that buffers changes to its host
@@ -566,7 +512,8 @@ func (snap *snapshot) hasInSnapshot(snapDb *pebble.Snapshot, key []byte) (bool, 
 func (snap *snapshot) Get(key []byte) ([]byte, error) {
 	// Try to get from hot snapshot
 	if data, err := snap.getFromSnapshot(snap.dbHot, key); err == nil {
-		return data[:len(data)-10], nil
+		data = getValueFromVT(data)
+		return data, nil
 	} else if err != pebble.ErrNotFound {
 		return nil, err
 	}
@@ -791,21 +738,21 @@ type batch struct {
 	bCold  *pebble.Batch
 	db     *Database
 	size   int
+	putCnt int
 }
 
 // Put inserts the given value into the batch for later committing.
 func (b *batch) Put(key, value []byte) error {
-	timeByte := []byte(fmt.Sprintf("%d", time.Now().Unix()))
-	if len(timeByte) != 10 {
-		return fmt.Errorf("len(timeByte): %d", len(timeByte))
-	}
+	timeUnix := time.Now().UnixNano()
+	timeByte := make([]byte, timeStampSize)
+	binary.BigEndian.PutUint64(timeByte, uint64(timeUnix))
 	valueTime := append(value, timeByte...)
-	
-	b.bHot.Set(key, valueTime, nil)
 	timeKey := append([]byte("t:"),timeByte...)
+
+	b.bHot.Set(key, valueTime, nil)
 	b.bHot.Set(timeKey, key, nil)
 	b.size += len(key) + len(valueTime) + len(timeKey) + len(key)
-	b.db.kvCnt.Add(1)
+	b.putCnt += 1
 	return nil
 }
 
@@ -828,6 +775,67 @@ func (b *batch) ValueSize() int {
 	return b.size
 }
 
+func getTimeFromVT(value []byte) []byte {
+	return value[len(value)-timeStampSize:]
+}
+
+func getValueFromVT(value []byte) []byte {
+	return value[:len(value)-timeStampSize]
+}
+
+func (d *Database) evictOldEntries() error {
+	// d.evictionLock.Lock()
+	if !d.evictionLock.TryLock() {
+		fmt.Println("Eviction is already in progress")
+		return nil
+	}
+	defer d.evictionLock.Unlock()
+
+	// get oldest time key from hotDb
+	iter := d.NewIterator([]byte("t:"), nil).(*pebbleIterator)
+	defer iter.Release()
+	batch := d.hotDb.NewBatch()
+	defer batch.Close()
+	i := 0
+	for iter.NextHot() {
+		if d.kvCnt.Load() <= int64(d.ssdThreshold)*4/5 {
+			break
+		}
+		timeStamp := iter.Key()
+		keyFromTimeDb := iter.ValueTime()
+
+		if err := batch.Delete(timeStamp, d.writeOptions); err != nil {
+			return err
+		}
+		i++
+		d.kvCnt.Add(-1)
+		// get value from hotDb
+		valueTime, err := d.GetAll(keyFromTimeDb)
+		if err != nil {
+			fmt.Println("deleted key")
+			continue
+		}
+		timeFromHot := getTimeFromVT(valueTime)
+		valueFromHot := getValueFromVT(valueTime)
+
+		// compare time keys and delete value key from hotDb
+		if bytes.Equal(timeFromHot, timeStamp[2:]) {
+			if err := batch.Delete(keyFromTimeDb, d.writeOptions); err != nil {
+				return err
+			}
+			d.coldDb.Set(keyFromTimeDb, valueFromHot, d.writeOptions)
+			// fmt.Printf("%X is moved to coldDb\n", keyFromTimeDb)
+		}
+	}
+	if err := batch.Commit(d.writeOptions); err != nil {
+		return err
+	}
+	fmt.Println("Eviction Iteration :", i)
+	fmt.Println("kvCnt After Eviction :", d.kvCnt.Load())
+	return nil
+}
+
+
 // Write flushes any accumulated data to disk.
 func (b *batch) Write() error {
 	b.db.quitLock.RLock()
@@ -839,57 +847,18 @@ func (b *batch) Write() error {
 		fmt.Println("dbHot Batch Write Error:", err)
 		return err
 	}
+	b.db.kvCnt.Add(int64(b.putCnt))
 
 	if err := b.bCold.Commit(b.db.writeOptions); err != nil {
 		fmt.Println("dbCold Batch Write Error:", err)
 		return err
 	}
-	kvcnt := b.db.kvCnt.Load()
-	fmt.Println("kvCnt :", kvcnt)
-	if kvcnt < int64(b.db.ssdThreshold*9/10){
-		return nil
-	}
-
-	// get oldest time key from hotDb
-	iter := b.db.NewIterator([]byte("t:"), nil).(*pebbleIterator)
-	defer iter.Release()
-	batch := b.db.hotDb.NewBatch()
-	defer batch.Close()
-		
-	for i:=0; i<b.db.ssdThreshold/10; i++ {
-		if !iter.Next(){
-			fmt.Println("time record is empty")
-			break
-		}
-		timeStamp := iter.Key()
-		keyFromTimeDb := iter.ValueTime()
-
-		if err := batch.Delete(timeStamp, b.db.writeOptions); err != nil {
+	if b.db.kvCnt.Load() >= int64(b.db.ssdThreshold*9/10) {
+		if err := b.db.evictOldEntries(); err != nil {
 			return err
 		}
-		// get value from hotDb
-		valueTime, err := b.db.GetAll(keyFromTimeDb)
-		if err != nil {
-			fmt.Println("deleted key")
-			continue
-		}
-		timeFromHot := valueTime[len(valueTime)-10:]
-		valueFromHot := valueTime[:len(valueTime)-10]
-		// compare time keys and delete value key from hotDb
-		if bytes.Equal(timeFromHot, timeStamp[2:]){
-			if err := batch.Delete(keyFromTimeDb, b.db.writeOptions); err != nil {
-				return err
-			}
-			b.db.coldDb.Set(keyFromTimeDb, valueFromHot, b.db.writeOptions)
-			fmt.Printf("%X is moved to coldDb\n", keyFromTimeDb)
-		}
 	}
-	b.db.kvCnt.Add(-int64(b.db.ssdThreshold/10))
-	fmt.Println("kvCnt After Eviction :", b.db.kvCnt.Load())
-	if err := batch.Commit(b.db.writeOptions); err != nil {
-		return err
-	}
-
+	
 	return nil
 }
 
@@ -981,7 +950,13 @@ func (d *Database) NewIterator(prefix []byte, start []byte) ethdb.Iterator {
 		turnHot:      true, // current turn
 	}
 }
-
+func (iter *pebbleIterator) NextHot() bool {
+	if iter.moved {
+		iter.moved = false
+		return iter.iterHot.Valid()
+	}
+	return iter.iterHot.Next()
+}
 func (iter *pebbleIterator) Next() bool {
 	if iter.movedHot && iter.movedCold {
 		iter.movedHot = false
@@ -1080,7 +1055,8 @@ func (iter *pebbleIterator) KeyCold() []byte {
 func (iter *pebbleIterator) Value() []byte {
 	if iter.turnHot {
 		val:= iter.iterHot.Value()
-		return val[:len(val)-10]
+		val = getValueFromVT(val)
+		return val
 	} else {
 		return iter.iterCold.Value()
 	}

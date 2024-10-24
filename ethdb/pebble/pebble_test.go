@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"github.com/stretchr/testify/assert"
 	"crypto/rand"
+	"sync"
 )
 // generateRandomBytes creates a random byte slice of a given length
 func generateRandomBytes(length int) []byte {
@@ -40,7 +41,7 @@ func TestNew(t *testing.T) {
 
 func TestOverThreshold(t *testing.T) {
 	fmt.Println("==============TestOverThreshold==============")
-	ssdThreshold :=100
+	ssdThreshold :=50
 	dbFile1 := "test_db1"
 	dbFile2 := "test_db2"
 	cacheSize := 64
@@ -105,6 +106,57 @@ func TestOverThreshold(t *testing.T) {
 	err = b.Write()
 	assert.NoError(t, err, "Failed to write batch")
 
+	
+	numRecords := 50 // Adjust this number as needed to increase size
+	keySize := 32         // Size of each key in bytes
+	valueSize := 1000000     // Size of each value in bytes
+	batch := db.NewBatch()
+	// Test batch
+	for i := 0; i < numRecords; i++ {
+		// Generate a random key and value
+		key := generateRandomBytes(keySize)
+		value := generateRandomBytes(valueSize)
+
+		// Insert the key-value pair into the batch
+		err = batch.Put(key, value)
+		if err != nil {
+			t.Fatalf("Failed to put key in database: %v", err)
+		}
+	}
+	batch.Write()
+
+	var wg sync.WaitGroup
+	numGoroutines := 10
+
+	for j := 0; j < numGoroutines; j++ {
+		wg.Add(1)
+		go func(workerID int) {
+			defer wg.Done()
+
+			// Create a new batch for each goroutine
+			b2 := db.NewBatch()
+			for i := 0; i < numRecords; i++ {
+				// Generate a random key and value
+				key := generateRandomBytes(keySize)
+				value := generateRandomBytes(valueSize)
+
+				// Insert the key-value pair into the batch
+				err := b2.Put(key, value)
+				if err != nil {
+					t.Fatalf("Worker %d: Failed to put key in database: %v", workerID, err)
+				}
+			}
+			// Write the batch
+			err := b2.Write()
+			assert.NoError(t, err, "Worker %d: Failed to write batch", workerID)
+		}(j)
+	}
+
+	// Wait for all goroutines to finish
+	wg.Wait()
+
+	
+
 	// Test NewIterator
 	fmt.Println("# Iterator prefix key")
 	iter := db.NewIterator([]byte("key"), []byte(""))
@@ -157,9 +209,6 @@ func TestOverThreshold(t *testing.T) {
 	b.Reset()
 	b.Replay(db)
 
-	numRecords := 500 // Adjust this number as needed to increase size
-	keySize := 32         // Size of each key in bytes
-	valueSize := 100000000     // Size of each value in bytes
 	for i := 0; i < numRecords; i++ {
 		// Generate a random key and value
 		key := generateRandomBytes(keySize)
