@@ -344,12 +344,11 @@ func (d *Database) Has(key []byte) (bool, error) {
 		} else if err != nil {
 			return false, err
 		}
-		defer closer.Close()
 		return true, nil
 	} else if err != nil {
 		return false, err
 	}
-	closer.Close()
+	defer closer.Close()
 	return true, nil
 }
 
@@ -784,14 +783,19 @@ func getValueFromVT(value []byte) []byte {
 }
 
 func (d *Database) evictOldEntries() error {
-	d.evictionLock.Lock()
-	defer d.evictionLock.Unlock()
+	// d.evictionLock.Lock()
+	// defer d.evictionLock.Unlock()
 
 	// get oldest time key from hotDb
 	iter := d.NewIterator([]byte("t:"), nil).(*pebbleIterator)
 	defer iter.Release()
-	batch := d.hotDb.NewBatch()
-	defer batch.Close()
+	batchHot := d.hotDb.NewBatch()
+	defer batchHot.Close()
+	batchCold := &batch{
+		bHot:  d.hotDb.NewBatch(),
+		bCold: d.coldDb.NewBatch(),
+		db:    d,
+	}
 	i := 0
 	for iter.NextHot() {
 		if d.kvCnt.Load() <= int64(d.ssdThreshold)*4/5 {
@@ -800,7 +804,7 @@ func (d *Database) evictOldEntries() error {
 		timeStamp := iter.Key()
 		keyFromTimeDb := iter.ValueTime()
 
-		if err := batch.Delete(timeStamp, d.writeOptions); err != nil {
+		if err := batchHot.Delete(timeStamp, d.writeOptions); err != nil {
 			return err
 		}
 		i++
@@ -816,14 +820,18 @@ func (d *Database) evictOldEntries() error {
 
 		// compare time keys and delete value key from hotDb
 		if bytes.Equal(timeFromHot, timeStamp[2:]) {
-			if err := batch.Delete(keyFromTimeDb, d.writeOptions); err != nil {
+			if err := batchHot.Delete(keyFromTimeDb, d.writeOptions); err != nil {
 				return err
 			}
-			d.coldDb.Set(keyFromTimeDb, valueFromHot, d.writeOptions)
+			// d.coldDb.Set(keyFromTimeDb, valueFromHot, d.writeOptions)
+			batchCold.PutCold(keyFromTimeDb, valueFromHot)
 			// fmt.Printf("%X is moved to coldDb\n", keyFromTimeDb)
 		}
 	}
-	if err := batch.Commit(d.writeOptions); err != nil {
+	if err := batchHot.Commit(d.writeOptions); err != nil {
+		return err
+	}
+	if err := batchCold.CommitCold(); err != nil {
 		return err
 	}
 	fmt.Println("Eviction Iteration :", i)
@@ -831,6 +839,18 @@ func (d *Database) evictOldEntries() error {
 	return nil
 }
 
+func (b *batch) CommitCold() error {
+	b.db.quitLock.RLock()
+	defer b.db.quitLock.RUnlock()
+	if b.db.closed {
+		return pebble.ErrClosed
+	}
+	if err := b.bCold.Commit(b.db.writeOptions); err != nil {
+		fmt.Println("dbCold Batch Write Error:", err)
+		return err
+	}
+	return nil
+}
 
 // Write flushes any accumulated data to disk.
 func (b *batch) Write() error {
