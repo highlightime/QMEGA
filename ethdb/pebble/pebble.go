@@ -785,10 +785,6 @@ func getValueFromVT(value []byte) []byte {
 
 func (d *Database) evictOldEntries() error {
 	d.evictionLock.Lock()
-	// if !d.evictionLock.TryLock() {
-	// 	fmt.Println("Eviction is already in progress")
-	// 	return nil
-	// }
 	defer d.evictionLock.Unlock()
 
 	// get oldest time key from hotDb
