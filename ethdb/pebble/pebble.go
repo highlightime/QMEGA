@@ -24,6 +24,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	// "encoding/hex"
+	"encoding/base64"
 
 	"github.com/cockroachdb/pebble"
 	"github.com/cockroachdb/pebble/bloom"
@@ -287,14 +289,14 @@ func (d *Database) Has(key []byte) (bool, error) {
 	if d.closed {
 		return false, pebble.ErrClosed
 	}
-	_, closer, err := d.db.Get(key)
+	dat, closer, err := d.db.Get(key)
 	if err == pebble.ErrNotFound {
 		return false, nil
 	} else if err != nil {
 		return false, err
 	}
 	// print key
-	fmt.Printf("hk: %s\n", string(key))
+	fmt.Printf("hk: %s, z: %d\n", base64.StdEncoding.EncodeToString(key), len(key)+len(dat))
 	closer.Close()
 	return true, nil
 }
@@ -313,7 +315,7 @@ func (d *Database) Get(key []byte) ([]byte, error) {
 	ret := make([]byte, len(dat))
 	copy(ret, dat)
 	// print key
-	fmt.Printf("gk: %s\n", string(key))
+	fmt.Printf("gk: %s, z: %d\n", base64.StdEncoding.EncodeToString(key), len(key)+len(dat))
 	closer.Close()
 	return ret, nil
 }
@@ -326,7 +328,7 @@ func (d *Database) Put(key []byte, value []byte) error {
 		return pebble.ErrClosed
 	}
 	// print size of key and value
-	fmt.Printf("pks: %s, pk: %d, v: %d\n", string(key), len(key), len(value))
+	fmt.Printf("pk: %s, z: %d\n", base64.StdEncoding.EncodeToString(key), len(key)+len(value))
 	return d.db.Set(key, value, d.writeOptions)
 }
 
@@ -337,8 +339,6 @@ func (d *Database) Delete(key []byte) error {
 	if d.closed {
 		return pebble.ErrClosed
 	}
-	// print key
-	fmt.Printf("dk: %s\n", string(key))
 	return d.db.Delete(key, nil)
 }
 
@@ -377,7 +377,7 @@ func (d *Database) NewSnapshot() (ethdb.Snapshot, error) {
 // Has retrieves if a key is present in the snapshot backing by a key-value
 // data store.
 func (snap *snapshot) Has(key []byte) (bool, error) {
-	_, closer, err := snap.db.Get(key)
+	dat, closer, err := snap.db.Get(key)
 	if err != nil {
 		if err != pebble.ErrNotFound {
 			return false, err
@@ -386,7 +386,7 @@ func (snap *snapshot) Has(key []byte) (bool, error) {
 		}
 	}
 	// print key
-	fmt.Printf("hk: %s\n", string(key))
+	fmt.Printf("shk: %s, z: %d\n", base64.StdEncoding.EncodeToString(key), len(key)+len(dat))
 	closer.Close()
 	return true, nil
 }
@@ -401,7 +401,7 @@ func (snap *snapshot) Get(key []byte) ([]byte, error) {
 	ret := make([]byte, len(dat))
 	copy(ret, dat)
 	// print key
-	fmt.Printf("gk: %s\n", string(key))
+	fmt.Printf("sgk: %s, z: %d\n", base64.StdEncoding.EncodeToString(key), len(key)+len(dat))
 	closer.Close()
 	return ret, nil
 }
@@ -572,26 +572,25 @@ func (d *Database) meter(refresh time.Duration, namespace string) {
 	errc <- nil
 }
 
+type LOGGING struct {
+	key string
+	size int
+}
+
 // batch is a write-only batch that commits changes to its host database
 // when Write is called. A batch cannot be used concurrently.
 type batch struct {
 	b    *pebble.Batch
 	db   *Database
 	size int
-	ksize  int64 // Atomic key size tracking
-	vsize  int64 // Atomic key size tracking
-	batchLen int64 // Atomic batch size tracking
-	keys      []string // string 배열로 키를 저장
+	keys      []LOGGING 
 }
 
 // Put inserts the given value into the batch for later committing.
 func (b *batch) Put(key, value []byte) error {
 	b.b.Set(key, value, nil)
 	b.size += len(key) + len(value)
-	atomic.AddInt64(&b.ksize, int64(len(key))) 
-	atomic.AddInt64(&b.vsize, int64(len(value)))
-	atomic.AddInt64(&b.batchLen, 1)
-	b.keys = append(b.keys, string(key))
+	b.keys = append(b.keys, LOGGING{key: base64.StdEncoding.EncodeToString(key), size: len(key) + len(value)})
 	return nil
 }
 
@@ -599,9 +598,6 @@ func (b *batch) Put(key, value []byte) error {
 func (b *batch) Delete(key []byte) error {
 	b.b.Delete(key, nil)
 	b.size += len(key)
-	atomic.AddInt64(&b.ksize, int64(len(key)))
-	atomic.AddInt64(&b.batchLen, 1)
-	b.keys = append(b.keys, string(key))
 	return nil
 }
 
@@ -618,10 +614,9 @@ func (b *batch) Write() error {
 		return pebble.ErrClosed
 	}
 	// Print Keys with iteration
-	for _, key := range b.keys {
-        fmt.Printf("bks: %s\n", key)
+	for _, k := range b.keys {
+        fmt.Printf("bk: %s, z: %d\n", k.key, k.size)
     }
-	fmt.Printf("bk: %d, bv: %d\n", b.ksize/b.batchLen, b.vsize/b.batchLen)
 	return b.b.Commit(b.db.writeOptions)
 }
 
@@ -680,11 +675,11 @@ func (iter *pebbleIterator) Next() bool {
 	if iter.moved {
 		iter.moved = false
 		if iter.iter.Valid(){
-			fmt.Printf("ik: %x\n", iter.iter.Key())
+			fmt.Printf("ik: %X, z: %d\n", base64.StdEncoding.EncodeToString(iter.iter.Key()), len(iter.iter.Key())+len(iter.iter.Value()))
 			return true
 		}
 	}
-	fmt.Printf("ik: %x\n", iter.iter.Key())
+	fmt.Printf("ik: %X, z: %d\n", base64.StdEncoding.EncodeToString(iter.iter.Key()), len(iter.iter.Key())+len(iter.iter.Value()))
 	return iter.iter.Next()
 }
 
