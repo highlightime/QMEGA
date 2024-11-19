@@ -50,7 +50,8 @@ var FullNodeGPO = gasprice.Config{
 var Defaults = Config{
 	SyncMode:           downloader.SnapSync,
 	NetworkId:          0, // enable auto configuration of networkID == chainID
-	Threshold:		  1,
+	Threshold:          1,
+	EvictionRate:       10,
 	TxLookupLimit:      2350000,
 	TransactionHistory: 2350000,
 	StateHistory:       params.FullImmutabilityThreshold,
@@ -80,9 +81,10 @@ type Config struct {
 
 	// Network ID separates blockchains on the peer-to-peer networking level. When left
 	// zero, the chain ID is used as network ID.
-	NetworkId uint64
-	Threshold uint64
-	SyncMode  downloader.SyncMode
+	NetworkId    uint64
+	Threshold    uint64
+	EvictionRate uint64
+	SyncMode     downloader.SyncMode
 
 	// This can be set to list of enrtree:// URLs which will be queried for
 	// nodes to connect to.

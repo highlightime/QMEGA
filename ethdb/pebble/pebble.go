@@ -19,13 +19,13 @@ package pebble
 
 import (
 	"bytes"
+	"encoding/binary"
 	"fmt"
 	"runtime"
 	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
-	"encoding/binary"
 
 	// "unsafe"
 	// "runtime/debug"
@@ -34,6 +34,7 @@ import (
 	"github.com/cockroachdb/pebble/bloom"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/ethdb"
+
 	// "github.com/ethereum/go-ethereum/ethdb/eviction/lru"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/metrics"
@@ -58,17 +59,21 @@ const (
 )
 
 var path = "."
+
 const timeStampSize = 8
+const EVICT_RATIO = 10
+const TIME_INTERVAL = 1
 
 // Database is a persistent key-value store based on the pebble storage engine.
 // Apart from basic data storage functionality it also supports batch writes and
 // iterating over the keyspace in binary-alphabetical order.
 type Database struct {
-	hotFn        string     
+	hotFn        string
 	coldFn       string
-	hotDb        *pebble.DB 
+	hotDb        *pebble.DB
 	coldDb       *pebble.DB
 	ssdThreshold int
+	evictionRate int
 
 	compTimeMeter       metrics.Meter // Meter for measuring the total time spent in database compaction
 	compReadMeter       metrics.Meter // Meter for measuring the data read during compaction
@@ -105,7 +110,7 @@ type Database struct {
 
 	writeOptions *pebble.WriteOptions
 
-	kvCnt atomic.Int64
+	kvCnt        atomic.Int64
 	evictionLock sync.Mutex
 }
 
@@ -174,7 +179,7 @@ func (l panicLogger) Fatalf(format string, args ...interface{}) {
 
 // New returns a wrapped pebble DB object. The namespace is the prefix that the
 // metrics reporting should use for surfacing internal stats.
-func New(ssdThreshold int, file1, file2 string, cache int, handles int, namespace string, readonly bool, ephemeral bool) (*Database, error) {
+func New(evictionRate int, ssdThreshold int, file1, file2 string, cache int, handles int, namespace string, readonly bool, ephemeral bool) (*Database, error) {
 	// Ensure we have some minimal caching and file guarantees
 	if cache < minCache {
 		cache = minCache
@@ -215,6 +220,7 @@ func New(ssdThreshold int, file1, file2 string, cache int, handles int, namespac
 		hotFn:        file1,
 		coldFn:       file2,
 		ssdThreshold: ssdThreshold,
+		evictionRate: evictionRate,
 		log:          logger,
 		quitChan:     make(chan chan error),
 		writeOptions: &pebble.WriteOptions{Sync: !ephemeral},
@@ -295,6 +301,7 @@ func New(ssdThreshold int, file1, file2 string, cache int, handles int, namespac
 
 	// Start up the metrics gathering and return
 	go db.meter(metricsGatheringInterval, namespace)
+	go db.EvictionBackground()
 	return db, nil
 }
 
@@ -326,6 +333,30 @@ func (d *Database) Close() error {
 	}
 
 	return nil
+}
+
+func (d *Database) EvictionBackground() {
+	var errc chan error
+	ticker := time.NewTicker(TIME_INTERVAL * time.Second)
+	defer ticker.Stop()
+
+	go func() {
+		for i := 1; errc == nil; i++ {
+			select {
+			case <-ticker.C:
+				if d.kvCnt.Load() >= int64(d.ssdThreshold) {
+					if err := d.evictOldEntries(); err != nil {
+						d.log.Error("Background Eviction Failed", "err", err)
+					} else {
+						fmt.Println("Background Eviction Success")
+					}
+				}
+			case errc = <-d.quitChan:
+			}
+		}
+	}()
+
+	select {}
 }
 
 // Has retrieves if a key is present in the key-value store.
@@ -363,7 +394,7 @@ func (d *Database) Get(key []byte) ([]byte, error) {
 	if err != nil {
 		// check cold db if key is not found in hot db
 		dat, err := d.GetCold(key)
-		if err!= nil {
+		if err != nil {
 			return nil, err
 		}
 		ret := make([]byte, len(dat))
@@ -585,34 +616,34 @@ func (d *Database) Compact(start []byte, limit []byte) error {
 	}
 	// TODO: Parallelization Compaction?
 	var wg sync.WaitGroup
-    var mu sync.Mutex
+	var mu sync.Mutex
 
-    var err error
+	var err error
 
-    compactDb := func(db *pebble.DB) {
-        defer wg.Done()
-        if e := db.Compact(start, limit, true); e != nil {
-            mu.Lock()
-            if err == nil {
-                err = e
-            }
-            mu.Unlock()
-        }
-    }
+	compactDb := func(db *pebble.DB) {
+		defer wg.Done()
+		if e := db.Compact(start, limit, true); e != nil {
+			mu.Lock()
+			if err == nil {
+				err = e
+			}
+			mu.Unlock()
+		}
+	}
 
-    wg.Add(1)
-    go compactDb(d.hotDb)
+	wg.Add(1)
+	go compactDb(d.hotDb)
 
-    wg.Add(1)
-    go compactDb(d.coldDb)
+	wg.Add(1)
+	go compactDb(d.coldDb)
 
-    wg.Wait()
+	wg.Wait()
 
-    if err != nil {
-        return err
-    }
+	if err != nil {
+		return err
+	}
 
-    return nil
+	return nil
 }
 
 // Path returns the path to the database directory.
@@ -746,7 +777,7 @@ func (b *batch) Put(key, value []byte) error {
 	timeByte := make([]byte, timeStampSize)
 	binary.BigEndian.PutUint64(timeByte, uint64(timeUnix))
 	valueTime := append(value, timeByte...)
-	timeKey := append([]byte("t:"),timeByte...)
+	timeKey := append([]byte("t:"), timeByte...)
 
 	b.bHot.Set(key, valueTime, nil)
 	b.bHot.Set(timeKey, key, nil)
@@ -798,7 +829,9 @@ func (d *Database) evictOldEntries() error {
 	}
 	i := 0
 	for iter.NextHot() {
-		if d.kvCnt.Load() <= int64(d.ssdThreshold)*4/5 {
+		// rate := float64(d.ssdThreshold) * float64(100-d.evictionRate) / 100
+		rate := float64(d.ssdThreshold) * float64(100-EVICT_RATIO) / 100
+		if float64(d.kvCnt.Load()) <= rate {
 			break
 		}
 		timeStamp := iter.Key()
@@ -813,7 +846,7 @@ func (d *Database) evictOldEntries() error {
 		valueTime, err := d.GetAll(keyFromTimeDb)
 		if err != nil {
 			fmt.Println("deleted key")
-			continue
+			break
 		}
 		timeFromHot := getTimeFromVT(valueTime)
 		valueFromHot := getValueFromVT(valueTime)
@@ -828,10 +861,10 @@ func (d *Database) evictOldEntries() error {
 			// fmt.Printf("%X is moved to coldDb\n", keyFromTimeDb)
 		}
 	}
-	if err := batchHot.Commit(d.writeOptions); err != nil {
+	if err := batchCold.CommitCold(); err != nil {
 		return err
 	}
-	if err := batchCold.CommitCold(); err != nil {
+	if err := batchHot.Commit(d.writeOptions); err != nil {
 		return err
 	}
 	fmt.Println("Eviction Iteration :", i)
@@ -852,7 +885,6 @@ func (b *batch) CommitCold() error {
 	return nil
 }
 
-// Write flushes any accumulated data to disk.
 func (b *batch) Write() error {
 	b.db.quitLock.RLock()
 	defer b.db.quitLock.RUnlock()
@@ -869,12 +901,6 @@ func (b *batch) Write() error {
 		fmt.Println("dbCold Batch Write Error:", err)
 		return err
 	}
-	if b.db.kvCnt.Load() >= int64(b.db.ssdThreshold*9/10) {
-		if err := b.db.evictOldEntries(); err != nil {
-			return err
-		}
-	}
-	
 	return nil
 }
 
@@ -926,7 +952,6 @@ func replayBatch(batch *pebble.Batch, w ethdb.KeyValueWriter) error {
 type pebbleIterator struct {
 	iterHot      *pebble.Iterator
 	iterCold     *pebble.Iterator
-	iter 		  *pebble.Iterator
 	movedHot     bool
 	movedCold    bool
 	releasedHot  bool
@@ -955,8 +980,8 @@ func (d *Database) NewIterator(prefix []byte, start []byte) ethdb.Iterator {
 	return &pebbleIterator{
 		iterHot:      iterHot,
 		iterCold:     iterCold,
-		moved: 	  true,
-		released: false,
+		moved:        true,
+		released:     false,
 		movedHot:     true,
 		movedCold:    true,
 		releasedHot:  false,
@@ -1070,7 +1095,7 @@ func (iter *pebbleIterator) KeyCold() []byte {
 // may change on the next call to Next.
 func (iter *pebbleIterator) Value() []byte {
 	if iter.turnHot {
-		val:= iter.iterHot.Value()
+		val := iter.iterHot.Value()
 		val = getValueFromVT(val)
 		return val
 	} else {
@@ -1082,9 +1107,10 @@ func (iter *pebbleIterator) Value() []byte {
 func (iter *pebbleIterator) ValueTime() []byte {
 	if iter.turnHot {
 		return iter.iterHot.Value()
-	} 
+	}
 	return nil
 }
+
 // Release releases associated resources. Release should always succeed and can
 // be called multiple times without causing error.
 func (iter *pebbleIterator) Release() {
