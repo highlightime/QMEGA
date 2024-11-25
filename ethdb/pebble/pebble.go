@@ -24,7 +24,6 @@ import (
 	"runtime"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 
 	// "unsafe"
@@ -57,8 +56,6 @@ const (
 	// leveldb database cannot keep up with requested writes.
 	degradationWarnInterval = time.Minute
 )
-
-var path = "."
 
 const timeStampSize = 8
 const EVICT_RATIO = 10
@@ -112,21 +109,6 @@ type Database struct {
 
 	kvCnt        atomic.Int64
 	evictionLock sync.Mutex
-}
-
-func getDiskUsage(path string) (total uint64, free uint64, used uint64, usage float64, err error) {
-	fs := syscall.Statfs_t{}
-	err = syscall.Statfs(path, &fs)
-	if err != nil {
-		return
-	}
-
-	total = fs.Blocks * uint64(fs.Bsize)
-	free = fs.Bfree * uint64(fs.Bsize)
-	used = total - free
-	usage = (float64(used) / float64(total)) * 100
-
-	return
 }
 
 func (d *Database) onCompactionBegin(info pebble.CompactionInfo) {
@@ -283,8 +265,6 @@ func New(evictionRate int, ssdThreshold int, file1, file2 string, cache int, han
 	}
 	db.coldDb = innerDB2
 
-	path = file1
-
 	db.compTimeMeter = metrics.GetOrRegisterMeter(namespace+"compact/time", nil)
 	db.compReadMeter = metrics.GetOrRegisterMeter(namespace+"compact/input", nil)
 	db.compWriteMeter = metrics.GetOrRegisterMeter(namespace+"compact/output", nil)
@@ -416,6 +396,7 @@ func (d *Database) GetTime(key []byte) ([]byte, error) {
 	}
 	dat, closer, err := d.hotDb.Get(key)
 	if err != nil {
+		closer.Close()
 		return nil, err
 	}
 	ret := make([]byte, timeStampSize)
@@ -425,7 +406,7 @@ func (d *Database) GetTime(key []byte) ([]byte, error) {
 	return ret, nil
 }
 
-func (d *Database) GetAll(key []byte) ([]byte, error) {
+func (d *Database) GetVT(key []byte) ([]byte, error) {
 	d.quitLock.RLock()
 	defer d.quitLock.RUnlock()
 	if d.closed {
@@ -835,18 +816,17 @@ func (d *Database) evictOldEntries() error {
 			break
 		}
 		timeStamp := iter.Key()
-		keyFromTimeDb := iter.ValueTime()
-
+		keyFromTimeDb := iter.VTKey()
 		if err := batchHot.Delete(timeStamp, d.writeOptions); err != nil {
 			return err
 		}
 		i++
 		d.kvCnt.Add(-1)
 		// get value from hotDb
-		valueTime, err := d.GetAll(keyFromTimeDb)
+		valueTime, err := d.GetVT(keyFromTimeDb)
 		if err != nil {
-			fmt.Println("deleted key")
-			break
+			// fmt.Println("deleted key")
+			continue
 		}
 		timeFromHot := getTimeFromVT(valueTime)
 		valueFromHot := getValueFromVT(valueTime)
@@ -859,6 +839,9 @@ func (d *Database) evictOldEntries() error {
 			// d.coldDb.Set(keyFromTimeDb, valueFromHot, d.writeOptions)
 			batchCold.PutCold(keyFromTimeDb, valueFromHot)
 			// fmt.Printf("%X is moved to coldDb\n", keyFromTimeDb)
+		}
+		if i > 1000000 {
+			break
 		}
 	}
 	if err := batchCold.CommitCold(); err != nil {
@@ -895,6 +878,7 @@ func (b *batch) Write() error {
 		fmt.Println("dbHot Batch Write Error:", err)
 		return err
 	}
+	fmt.Printf("Put Count: %d\n", b.putCnt)
 	b.db.kvCnt.Add(int64(b.putCnt))
 
 	if err := b.bCold.Commit(b.db.writeOptions); err != nil {
@@ -1073,7 +1057,6 @@ func (iter *pebbleIterator) Key() []byte {
 	} else {
 		return iter.iterCold.Key()
 	}
-	return nil
 }
 
 func (iter *pebbleIterator) KeyHot() []byte {
@@ -1101,10 +1084,9 @@ func (iter *pebbleIterator) Value() []byte {
 	} else {
 		return iter.iterCold.Value()
 	}
-	return nil
 }
 
-func (iter *pebbleIterator) ValueTime() []byte {
+func (iter *pebbleIterator) VTKey() []byte {
 	if iter.turnHot {
 		return iter.iterHot.Value()
 	}
