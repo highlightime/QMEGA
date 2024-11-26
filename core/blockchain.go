@@ -1551,6 +1551,7 @@ func (bc *BlockChain) writeBlockAndSetHead(block *types.Block, receipts []*types
 	if reorg {
 		// Reorganise the chain if the parent is not the head block
 		if block.ParentHash() != currentBlock.Hash() {
+			fmt.Println("REORG")
 			if err := bc.reorg(currentBlock, block); err != nil {
 				return NonStatTy, err
 			}

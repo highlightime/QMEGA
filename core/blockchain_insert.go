@@ -46,7 +46,7 @@ func (st *insertStats) report(chain []*types.Block, index int, snapDiffItems, sn
 		elapsed = now.Sub(st.startTime)
 	)
 	// If we're at the last block of the batch or report period reached, log
-	if index == len(chain)-1 || elapsed >= statsReportLimit {
+	// if index == len(chain)-1 || elapsed >= statsReportLimit {
 		// Count the number of transactions in this segment
 		var txs int
 		for _, block := range chain[st.lastIndex : index+1] {
@@ -87,7 +87,7 @@ func (st *insertStats) report(chain []*types.Block, index int, snapDiffItems, sn
 		}
 		// Bump the stats reported to the next section
 		*st = insertStats{startTime: now, lastIndex: index + 1}
-	}
+	// }
 }
 
 // insertIterator is a helper to assist during chain import.

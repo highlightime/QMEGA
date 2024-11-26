@@ -289,14 +289,14 @@ func (d *Database) Has(key []byte) (bool, error) {
 	if d.closed {
 		return false, pebble.ErrClosed
 	}
-	dat, closer, err := d.db.Get(key)
+	_, closer, err := d.db.Get(key)
 	if err == pebble.ErrNotFound {
 		return false, nil
 	} else if err != nil {
 		return false, err
 	}
 	// print key
-	fmt.Printf("hk: %s, z: %d\n", base64.StdEncoding.EncodeToString(key), len(key)+len(dat))
+	// fmt.Printf("hk: %s, z: %d\n", base64.StdEncoding.EncodeToString(key), len(key)+len(dat))
 	closer.Close()
 	return true, nil
 }
@@ -309,6 +309,8 @@ func (d *Database) Get(key []byte) ([]byte, error) {
 		return nil, pebble.ErrClosed
 	}
 	dat, closer, err := d.db.Get(key)
+	// fmt.Printf("POG: %p\n", d.db)
+
 	if err != nil {
 		return nil, err
 	}
@@ -317,6 +319,7 @@ func (d *Database) Get(key []byte) ([]byte, error) {
 	// print key
 	fmt.Printf("gk: %s, z: %d\n", base64.StdEncoding.EncodeToString(key), len(key)+len(dat))
 	closer.Close()
+	// printCallStack()
 	return ret, nil
 }
 
@@ -377,7 +380,7 @@ func (d *Database) NewSnapshot() (ethdb.Snapshot, error) {
 // Has retrieves if a key is present in the snapshot backing by a key-value
 // data store.
 func (snap *snapshot) Has(key []byte) (bool, error) {
-	dat, closer, err := snap.db.Get(key)
+	_, closer, err := snap.db.Get(key)
 	if err != nil {
 		if err != pebble.ErrNotFound {
 			return false, err
@@ -386,7 +389,7 @@ func (snap *snapshot) Has(key []byte) (bool, error) {
 		}
 	}
 	// print key
-	fmt.Printf("shk: %s, z: %d\n", base64.StdEncoding.EncodeToString(key), len(key)+len(dat))
+	// fmt.Printf("shk: %s, z: %d\n", base64.StdEncoding.EncodeToString(key), len(key)+len(dat))
 	closer.Close()
 	return true, nil
 }
@@ -401,7 +404,7 @@ func (snap *snapshot) Get(key []byte) ([]byte, error) {
 	ret := make([]byte, len(dat))
 	copy(ret, dat)
 	// print key
-	fmt.Printf("sgk: %s, z: %d\n", base64.StdEncoding.EncodeToString(key), len(key)+len(dat))
+	// fmt.Printf("sgk: %s, z: %d\n", base64.StdEncoding.EncodeToString(key), len(key)+len(dat))
 	closer.Close()
 	return ret, nil
 }
@@ -584,6 +587,13 @@ type batch struct {
 	db   *Database
 	size int
 	keys      []LOGGING 
+}
+
+func printCallStack() {
+	// 1024는 버퍼 크기를 설정합니다. 필요에 따라 조정할 수 있습니다.
+	buf := make([]byte, 1024)
+	n := runtime.Stack(buf, false)
+	fmt.Printf("Call stack:\n%s", buf[:n])
 }
 
 // Put inserts the given value into the batch for later committing.

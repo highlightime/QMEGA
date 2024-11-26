@@ -19,6 +19,8 @@ package core
 import (
 	"errors"
 	"math/big"
+	"runtime"
+	"fmt"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/consensus"
@@ -303,7 +305,14 @@ func (bc *BlockChain) GetTransactionLookup(hash common.Hash) (*rawdb.LegacyTxLoo
 // GetTd retrieves a block's total difficulty in the canonical chain from the
 // database by hash and number, caching it if found.
 func (bc *BlockChain) GetTd(hash common.Hash, number uint64) *big.Int {
+	// printCallStack()
 	return bc.hc.GetTd(hash, number)
+}
+func printCallStack() {
+	// 1024는 버퍼 크기를 설정합니다. 필요에 따라 조정할 수 있습니다.
+	buf := make([]byte, 1024)
+	n := runtime.Stack(buf, false)
+	fmt.Printf("Call stack:\n%s", buf[:n])
 }
 
 // HasState checks if state trie is fully present in the database or not.
