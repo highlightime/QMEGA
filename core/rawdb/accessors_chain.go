@@ -22,6 +22,8 @@ import (
 	"fmt"
 	"math/big"
 	"slices"
+	"sync/atomic"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/consensus/misc/eip4844"
@@ -566,6 +568,81 @@ func HasReceipts(db ethdb.Reader, hash common.Hash, number uint64) bool {
 		return false
 	}
 	return true
+}
+
+var (
+	HDD_ACCESS    atomic.Int64
+	SSD_THRESHOLD atomic.Int64
+	CURRENT_BLOCK atomic.Uint64
+	quitChan      = make(chan error)
+)
+
+const (
+	TIME_INTERVAL = 1
+	HDD_THRESHOLD = 1000
+	RECONF_NUM    = int64(1)
+)
+
+func InitReconfig() {
+	SSD_THRESHOLD.Store(10)
+	go BackgroundReconfigByBlock()
+}
+
+func SetCurrentBlock(blockNumber uint64) {
+	CURRENT_BLOCK.Store(blockNumber)
+}
+
+func BackgroundReconfigByBlock() {
+	var errc chan error
+	go func() {
+		for i := 1; errc == nil; i++ {
+			log.Info("reconfiguring")
+			if CURRENT_BLOCK.Load()%5 == 0 {
+				if HDD_ACCESS.Load() >= int64(HDD_THRESHOLD) {
+					log.Info("HDD access threshold reached")
+					SSD_THRESHOLD.Add(RECONF_NUM)
+				} else {
+					log.Info("HDD access threshold not reached")
+					SSD_THRESHOLD.Add(-RECONF_NUM)
+				}
+				HDD_ACCESS.Store(0)
+			}
+		}
+	}()
+
+	select {}
+}
+
+func BackgroundReconfigByTime() {
+	var errc chan error
+	ticker := time.NewTicker(TIME_INTERVAL * time.Second)
+	defer ticker.Stop()
+
+	go func() {
+		for i := 1; errc == nil; i++ {
+			select {
+			case <-ticker.C:
+				log.Info("reconfiguring")
+				if HDD_ACCESS.Load() >= int64(HDD_THRESHOLD) {
+					log.Info("HDD access threshold reached")
+					SSD_THRESHOLD.Add(RECONF_NUM)
+				} else {
+					log.Info("HDD access threshold not reached")
+					SSD_THRESHOLD.Add(-RECONF_NUM)
+				}
+				HDD_ACCESS.Store(0)
+			case err := <-quitChan:
+				if err != nil {
+					log.Info("Received quit signal with error:", err)
+				} else {
+					log.Info("Received quit signal, exiting reconfiguration loop")
+				}
+				return
+			}
+		}
+	}()
+
+	select {}
 }
 
 // ReadReceiptsRLP retrieves all the transaction receipts belonging to a block in RLP encoding.

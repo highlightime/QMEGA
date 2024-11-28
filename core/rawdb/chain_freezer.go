@@ -25,7 +25,6 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/ethdb"
 	"github.com/ethereum/go-ethereum/log"
-	"github.com/ethereum/go-ethereum/params"
 )
 
 const (
@@ -126,8 +125,9 @@ func (f *chainFreezer) freezeThreshold(db ethdb.KeyValueReader) (uint64, error) 
 		final     = f.readFinalizedNumber(db)
 		headLimit uint64
 	)
-	if head > params.FullImmutabilityThreshold {
-		headLimit = head - params.FullImmutabilityThreshold
+	threshold := uint64(SSD_THRESHOLD.Load())
+	if head > threshold {
+		headLimit = head - threshold
 	}
 	if final == 0 && headLimit == 0 {
 		return 0, errors.New("freezing threshold is not available")
