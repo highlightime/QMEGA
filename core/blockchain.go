@@ -1858,7 +1858,11 @@ func (bc *BlockChain) insertChain(chain types.Blocks, setHead bool) (int, error)
 		}
 		trieDiffNodes, trieBufNodes, _ := bc.triedb.Size()
 		rawdb.SetCurrentBlock(block.NumberU64())
+		if it.index >= 1000000 {
+			bc.db.Compact(nil, nil)
+		}
 		stats.report(chain, it.index, snapDiffItems, snapBufItems, trieDiffNodes, trieBufNodes, setHead)
+
 		if !setHead {
 			// After merge we expect few side chains. Simply count
 			// all blocks the CL gives us for GC processing time

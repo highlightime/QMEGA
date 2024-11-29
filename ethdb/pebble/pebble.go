@@ -437,6 +437,9 @@ func (d *Database) Compact(start []byte, limit []byte) error {
 	// there might be a shared prefix starting with a number of
 	// 0xff-s, so 32 ensures than only a hash collision could touch it.
 	// https://github.com/cockroachdb/pebble/issues/2359#issuecomment-1443995833
+	d.quitLock.Lock()
+	defer d.quitLock.Unlock()
+
 	if limit == nil {
 		limit = bytes.Repeat([]byte{0xff}, 32)
 	}
