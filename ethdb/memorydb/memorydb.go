@@ -388,3 +388,7 @@ func (snap *snapshot) Release() {
 
 	snap.db = nil
 }
+
+func (db *Database) Flush() error {
+	return nil
+}

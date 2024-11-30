@@ -305,3 +305,10 @@ func (iter *tableIterator) Value() []byte {
 func (iter *tableIterator) Release() {
 	iter.iter.Release()
 }
+func (t *table) Flush() error {
+	return nil
+}
+
+func (t *table) EstimateDiskUsage(start, end []byte) (uint64, error) {
+	return 0, nil
+}

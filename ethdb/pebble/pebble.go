@@ -682,3 +682,7 @@ func (iter *pebbleIterator) Release() {
 		iter.released = true
 	}
 }
+
+func (d *Database) EstimateDiskUsage(start, end []byte) (uint64, error) {
+	return d.db.EstimateDiskUsage(start, end)
+}

@@ -201,4 +201,16 @@ type Database interface {
 	Compacter
 	Snapshotter
 	io.Closer
+	Flusher
+	DiskUsagePrinter
+}
+
+type Flusher interface {
+	// Flush writes any buffered data to the underlying storage.
+	Flush() error
+}
+
+type DiskUsagePrinter interface {
+	// Total is the total disk space used by the database.
+	EstimateDiskUsage(start, end []byte) (uint64, error)
 }

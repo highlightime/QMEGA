@@ -664,3 +664,18 @@ func ReadChainMetadata(db ethdb.KeyValueStore) [][]string {
 	}
 	return data
 }
+func (db *nofreezedb) Flush() error {
+	return nil
+}
+
+func (frdb *freezerdb) Flush() error {
+	return nil
+}
+
+func (db *nofreezedb) EstimateDiskUsage(start, end []byte) (uint64, error) {
+	return 0, nil
+}
+
+func (frdb *freezerdb) EstimateDiskUsage(start, end []byte) (uint64, error) {
+	return 0, nil
+}

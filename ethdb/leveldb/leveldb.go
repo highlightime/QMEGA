@@ -521,3 +521,10 @@ func (snap *snapshot) Get(key []byte) ([]byte, error) {
 func (snap *snapshot) Release() {
 	snap.db.Release()
 }
+func (db *Database) Flush() error {
+	return nil
+}
+
+func (db *Database) EstimateDiskUsage(start, end []byte) (uint64, error) {
+	return 0, nil
+}

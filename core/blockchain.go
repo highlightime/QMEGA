@@ -1857,6 +1857,12 @@ func (bc *BlockChain) insertChain(chain types.Blocks, setHead bool) (int, error)
 			snapDiffItems, snapBufItems = bc.snaps.Size()
 		}
 		trieDiffNodes, trieBufNodes, _ := bc.triedb.Size()
+		if block.NumberU64() >= 1000000 {
+			bc.db.Flush()
+			bc.db.Compact(nil, nil)
+			usage, _ := bc.db.EstimateDiskUsage(nil, nil)
+			fmt.Println(usage)
+		}
 		stats.report(chain, it.index, snapDiffItems, snapBufItems, trieDiffNodes, trieBufNodes, setHead)
 
 		if !setHead {
