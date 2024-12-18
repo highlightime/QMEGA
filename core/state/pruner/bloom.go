@@ -98,7 +98,7 @@ func (bloom *stateBloom) Commit(filename, tempname string) error {
 }
 
 // Put implements the KeyValueWriter interface. But here only the key is needed.
-func (bloom *stateBloom) Put(key []byte, value []byte) error {
+func (bloom *stateBloom) Put(idx int, key []byte, value []byte) error {
 	// If the key length is not 32bytes, ensure it's contract code
 	// entry with new scheme.
 	if len(key) != common.HashLength {
@@ -114,7 +114,7 @@ func (bloom *stateBloom) Put(key []byte, value []byte) error {
 }
 
 // Delete removes the key from the key-value data store.
-func (bloom *stateBloom) Delete(key []byte) error { panic("not supported") }
+func (bloom *stateBloom) Delete(idx int, key []byte) error { panic("not supported") }
 
 // Contain is the wrapper of the underlying contains function which
 // reports whether the key is contained.

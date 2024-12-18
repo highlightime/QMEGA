@@ -493,7 +493,7 @@ func dbDelete(ctx *cli.Context) error {
 	if err == nil {
 		fmt.Printf("Previous value: %#x\n", data)
 	}
-	if err = db.Delete(key); err != nil {
+	if err = db.Delete(-801, key); err != nil {
 		log.Info("Delete operation returned an error", "key", fmt.Sprintf("%#x", key), "error", err)
 		return err
 	}
@@ -531,7 +531,7 @@ func dbPut(ctx *cli.Context) error {
 	if err == nil {
 		fmt.Printf("Previous value: %#x\n", data)
 	}
-	return db.Put(key, value)
+	return db.Put(801, key, value)
 }
 
 // dbDumpTrie shows the key-value slots of a given storage trie

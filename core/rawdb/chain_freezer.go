@@ -217,7 +217,7 @@ func (f *chainFreezer) freeze(db ethdb.KeyValueStore) {
 				DeleteCanonicalHash(batch, first+uint64(i))
 			}
 		}
-		if err := batch.Write(); err != nil {
+		if err := batch.Write(1); err != nil {
 			log.Crit("Failed to delete frozen canonical blocks", "err", err)
 		}
 		batch.Reset()
@@ -235,7 +235,7 @@ func (f *chainFreezer) freeze(db ethdb.KeyValueStore) {
 				}
 			}
 		}
-		if err := batch.Write(); err != nil {
+		if err := batch.Write(2); err != nil {
 			log.Crit("Failed to delete frozen side blocks", "err", err)
 		}
 		batch.Reset()
@@ -269,7 +269,7 @@ func (f *chainFreezer) freeze(db ethdb.KeyValueStore) {
 				dangling = children
 				tip++
 			}
-			if err := batch.Write(); err != nil {
+			if err := batch.Write(3); err != nil {
 				log.Crit("Failed to delete dangling side blocks", "err", err)
 			}
 		}

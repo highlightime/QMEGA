@@ -253,7 +253,7 @@ func (dl *diskLayer) revert(h *history) (*diskLayer, error) {
 		batch := dl.db.diskdb.NewBatch()
 		writeNodes(batch, nodes, dl.cleans)
 		rawdb.WritePersistentStateID(batch, dl.id-1)
-		if err := batch.Write(); err != nil {
+		if err := batch.Write(91); err != nil {
 			log.Crit("Failed to write states", "err", err)
 		}
 	}

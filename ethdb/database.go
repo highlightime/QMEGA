@@ -31,10 +31,10 @@ type KeyValueReader interface {
 // KeyValueWriter wraps the Put method of a backing data store.
 type KeyValueWriter interface {
 	// Put inserts the given value into the key-value data store.
-	Put(key []byte, value []byte) error
+	Put(idx int, key []byte, value []byte) error
 
 	// Delete removes the key from the key-value data store.
-	Delete(key []byte) error
+	Delete(idx int, key []byte) error
 }
 
 // KeyValueStater wraps the Stat method of a backing data store.

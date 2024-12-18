@@ -197,12 +197,12 @@ func (db *Database) Get(key []byte) ([]byte, error) {
 }
 
 // Put inserts the given value into the key-value store.
-func (db *Database) Put(key []byte, value []byte) error {
+func (db *Database) Put(idx int, key []byte, value []byte) error {
 	return db.db.Put(key, value, nil)
 }
 
 // Delete removes the key from the key-value store.
-func (db *Database) Delete(key []byte) error {
+func (db *Database) Delete(idx int, key []byte) error {
 	return db.db.Delete(key, nil)
 }
 
@@ -432,14 +432,14 @@ type batch struct {
 }
 
 // Put inserts the given value into the batch for later committing.
-func (b *batch) Put(key, value []byte) error {
+func (b *batch) Put(idx int, key, value []byte) error {
 	b.b.Put(key, value)
 	b.size += len(key) + len(value)
 	return nil
 }
 
 // Delete inserts the key removal into the batch for later committing.
-func (b *batch) Delete(key []byte) error {
+func (b *batch) Delete(idx int, key []byte) error {
 	b.b.Delete(key)
 	b.size += len(key)
 	return nil
@@ -451,7 +451,7 @@ func (b *batch) ValueSize() int {
 }
 
 // Write flushes any accumulated data to disk.
-func (b *batch) Write() error {
+func (b *batch) Write(idx int) error {
 	return b.db.Write(b.b, nil)
 }
 
@@ -478,7 +478,7 @@ func (r *replayer) Put(key, value []byte) {
 	if r.failure != nil {
 		return
 	}
-	r.failure = r.writer.Put(key, value)
+	r.failure = r.writer.Put(0, key, value)
 }
 
 // Delete removes the key from the key-value data store.
@@ -487,7 +487,7 @@ func (r *replayer) Delete(key []byte) {
 	if r.failure != nil {
 		return
 	}
-	r.failure = r.writer.Delete(key)
+	r.failure = r.writer.Delete(0, key)
 }
 
 // bytesPrefixRange returns key range that satisfy

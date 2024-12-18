@@ -266,7 +266,7 @@ func (s *CommitteeChain) addFixedCommitteeRoot(period uint64, root common.Hash) 
 	if err := s.fixedCommitteeRoots.add(batch, period, root); err != nil {
 		return err
 	}
-	if err := batch.Write(); err != nil {
+	if err := batch.Write(131); err != nil {
 		log.Error("Error writing batch into chain database", "error", err)
 		return err
 	}
@@ -300,7 +300,7 @@ func (s *CommitteeChain) deleteFixedCommitteeRootsFrom(period uint64) error {
 		}
 		s.deleteCommitteesFrom(batch, fromPeriod)
 	}
-	if err := batch.Write(); err != nil {
+	if err := batch.Write(141); err != nil {
 		log.Error("Error writing batch into chain database", "error", err)
 		return err
 	}
@@ -390,7 +390,7 @@ func (s *CommitteeChain) InsertUpdate(update *types.LightClientUpdate, nextCommi
 	if err := s.updates.add(batch, period, update); err != nil {
 		return err
 	}
-	if err := batch.Write(); err != nil {
+	if err := batch.Write(161); err != nil {
 		log.Error("Error writing batch into chain database", "error", err)
 		return err
 	}
@@ -438,7 +438,7 @@ func (s *CommitteeChain) rollback(period uint64) error {
 		if max > 0 {
 			s.updates.deleteFrom(batch, max-1)
 		}
-		if err := batch.Write(); err != nil {
+		if err := batch.Write(151); err != nil {
 			log.Error("Error writing batch into chain database", "error", err)
 			return err
 		}

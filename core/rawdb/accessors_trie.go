@@ -82,14 +82,14 @@ func HasAccountTrieNode(db ethdb.KeyValueReader, path []byte) bool {
 
 // WriteAccountTrieNode writes the provided account trie node into database.
 func WriteAccountTrieNode(db ethdb.KeyValueWriter, path []byte, node []byte) {
-	if err := db.Put(accountTrieNodeKey(path), node); err != nil {
+	if err := db.Put(471, accountTrieNodeKey(path), node); err != nil {
 		log.Crit("Failed to store account trie node", "err", err)
 	}
 }
 
 // DeleteAccountTrieNode deletes the specified account trie node from the database.
 func DeleteAccountTrieNode(db ethdb.KeyValueWriter, path []byte) {
-	if err := db.Delete(accountTrieNodeKey(path)); err != nil {
+	if err := db.Delete(-471, accountTrieNodeKey(path)); err != nil {
 		log.Crit("Failed to delete account trie node", "err", err)
 	}
 }
@@ -112,14 +112,14 @@ func HasStorageTrieNode(db ethdb.KeyValueReader, accountHash common.Hash, path [
 
 // WriteStorageTrieNode writes the provided storage trie node into database.
 func WriteStorageTrieNode(db ethdb.KeyValueWriter, accountHash common.Hash, path []byte, node []byte) {
-	if err := db.Put(storageTrieNodeKey(accountHash, path), node); err != nil {
+	if err := db.Put(491, storageTrieNodeKey(accountHash, path), node); err != nil {
 		log.Crit("Failed to store storage trie node", "err", err)
 	}
 }
 
 // DeleteStorageTrieNode deletes the specified storage trie node from the database.
 func DeleteStorageTrieNode(db ethdb.KeyValueWriter, accountHash common.Hash, path []byte) {
-	if err := db.Delete(storageTrieNodeKey(accountHash, path)); err != nil {
+	if err := db.Delete(-491, storageTrieNodeKey(accountHash, path)); err != nil {
 		log.Crit("Failed to delete storage trie node", "err", err)
 	}
 }
@@ -142,14 +142,14 @@ func HasLegacyTrieNode(db ethdb.KeyValueReader, hash common.Hash) bool {
 
 // WriteLegacyTrieNode writes the provided legacy trie node to database.
 func WriteLegacyTrieNode(db ethdb.KeyValueWriter, hash common.Hash, node []byte) {
-	if err := db.Put(hash.Bytes(), node); err != nil {
+	if err := db.Put(481, hash.Bytes(), node); err != nil {
 		log.Crit("Failed to store legacy trie node", "err", err)
 	}
 }
 
 // DeleteLegacyTrieNode deletes the specified legacy trie node from database.
 func DeleteLegacyTrieNode(db ethdb.KeyValueWriter, hash common.Hash) {
-	if err := db.Delete(hash.Bytes()); err != nil {
+	if err := db.Delete(-481, hash.Bytes()); err != nil {
 		log.Crit("Failed to delete legacy trie node", "err", err)
 	}
 }

@@ -232,7 +232,7 @@ func (b *nodebuffer) flush(db ethdb.KeyValueStore, clean *fastcache.Cache, id ui
 
 	// Flush all mutations in a single batch
 	size := batch.ValueSize()
-	if err := batch.Write(); err != nil {
+	if err := batch.Write(121); err != nil {
 		return err
 	}
 	commitBytesMeter.Mark(int64(size))

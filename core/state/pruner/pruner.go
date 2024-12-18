@@ -156,7 +156,7 @@ func prune(snaptree *snapshot.Tree, root common.Hash, maindb ethdb.Database, sta
 			}
 			count += 1
 			size += common.StorageSize(len(key) + len(iter.Value()))
-			batch.Delete(key)
+			batch.Delete(-581, key)
 
 			var eta time.Duration // Realistically will never remain uninited
 			if done := binary.BigEndian.Uint64(key[:8]); done > 0 {
@@ -174,7 +174,7 @@ func prune(snaptree *snapshot.Tree, root common.Hash, maindb ethdb.Database, sta
 			// Recreate the iterator after every batch commit in order
 			// to allow the underlying compactor to delete the entries.
 			if batch.ValueSize() >= ethdb.IdealBatchSize {
-				batch.Write()
+				batch.Write(251)
 				batch.Reset()
 
 				iter.Release()
@@ -183,7 +183,7 @@ func prune(snaptree *snapshot.Tree, root common.Hash, maindb ethdb.Database, sta
 		}
 	}
 	if batch.ValueSize() > 0 {
-		batch.Write()
+		batch.Write(252)
 		batch.Reset()
 	}
 	iter.Release()
@@ -423,7 +423,7 @@ func extractGenesis(db ethdb.Database, stateBloom *stateBloom) error {
 
 		// Embedded nodes don't have hash.
 		if hash != (common.Hash{}) {
-			stateBloom.Put(hash.Bytes(), nil)
+			stateBloom.Put(701, hash.Bytes(), nil)
 		}
 		// If it's a leaf node, yes we are touching an account,
 		// dig into the storage trie further.
@@ -445,7 +445,7 @@ func extractGenesis(db ethdb.Database, stateBloom *stateBloom) error {
 				for storageIter.Next(true) {
 					hash := storageIter.Hash()
 					if hash != (common.Hash{}) {
-						stateBloom.Put(hash.Bytes(), nil)
+						stateBloom.Put(702, hash.Bytes(), nil)
 					}
 				}
 				if storageIter.Error() != nil {
@@ -453,7 +453,7 @@ func extractGenesis(db ethdb.Database, stateBloom *stateBloom) error {
 				}
 			}
 			if !bytes.Equal(acc.CodeHash, types.EmptyCodeHash.Bytes()) {
-				stateBloom.Put(acc.CodeHash, nil)
+				stateBloom.Put(703, acc.CodeHash, nil)
 			}
 		}
 	}

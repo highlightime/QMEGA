@@ -987,7 +987,7 @@ func (bc *BlockChain) ResetWithGenesisBlock(genesis *types.Block) error {
 	batch := bc.db.NewBatch()
 	rawdb.WriteTd(batch, genesis.Hash(), genesis.NumberU64(), genesis.Difficulty())
 	rawdb.WriteBlock(batch, genesis)
-	if err := batch.Write(); err != nil {
+	if err := batch.Write(271); err != nil {
 		log.Crit("Failed to write genesis block", "err", err)
 	}
 	bc.writeHeadBlock(genesis)
@@ -1056,7 +1056,7 @@ func (bc *BlockChain) writeHeadBlock(block *types.Block) {
 	rawdb.WriteHeadBlockHash(batch, block.Hash())
 
 	// Flush the whole batch into the disk, exit the node if failed
-	if err := batch.Write(); err != nil {
+	if err := batch.Write(281); err != nil {
 		log.Crit("Failed to update chain indexes and markers", "err", err)
 	}
 	// Update all in-memory chain markers in the last step
@@ -1191,6 +1191,7 @@ func (bc *BlockChain) InsertReceiptChain(blockChain types.Blocks, receiptChain [
 	// concurrency of header insertion and receipt insertion.
 	bc.wg.Add(1)
 	defer bc.wg.Done()
+	// 의심점
 
 	var (
 		ancientBlocks, liveBlocks     types.Blocks
@@ -1325,7 +1326,7 @@ func (bc *BlockChain) InsertReceiptChain(blockChain types.Blocks, receiptChain [
 				rawdb.DeleteHeader(batch, nh.Hash, nh.Number)
 			}
 		}
-		if err := batch.Write(); err != nil {
+		if err := batch.Write(291); err != nil {
 			return 0, err
 		}
 		stats.processed += int32(len(blockChain))
@@ -1367,7 +1368,7 @@ func (bc *BlockChain) InsertReceiptChain(blockChain types.Blocks, receiptChain [
 			// we can ensure all components of body is completed(body, receipts)
 			// except transaction indexes(will be created once sync is finished).
 			if batch.ValueSize() >= ethdb.IdealBatchSize {
-				if err := batch.Write(); err != nil {
+				if err := batch.Write(292); err != nil {
 					return 0, err
 				}
 				size += int64(batch.ValueSize())
@@ -1380,7 +1381,7 @@ func (bc *BlockChain) InsertReceiptChain(blockChain types.Blocks, receiptChain [
 		// tx indexes)
 		if batch.ValueSize() > 0 {
 			size += int64(batch.ValueSize())
-			if err := batch.Write(); err != nil {
+			if err := batch.Write(293); err != nil {
 				return 0, err
 			}
 		}
@@ -1425,13 +1426,14 @@ func (bc *BlockChain) InsertReceiptChain(blockChain types.Blocks, receiptChain [
 // but does not write any state. This is used to construct competing side forks
 // up to the point where they exceed the canonical total difficulty.
 func (bc *BlockChain) writeBlockWithoutState(block *types.Block, td *big.Int) (err error) {
+	// 의심점
 	if bc.insertStopped() {
 		return errInsertionInterrupted
 	}
 	batch := bc.db.NewBatch()
 	rawdb.WriteTd(batch, block.Hash(), block.NumberU64(), td)
 	rawdb.WriteBlock(batch, block)
-	if err := batch.Write(); err != nil {
+	if err := batch.Write(301); err != nil {
 		log.Crit("Failed to write block into disk", "err", err)
 	}
 	return nil
@@ -1453,6 +1455,7 @@ func (bc *BlockChain) writeKnownBlock(block *types.Block) error {
 // writeBlockWithState writes block, metadata and corresponding state data to the
 // database.
 func (bc *BlockChain) writeBlockWithState(block *types.Block, receipts []*types.Receipt, statedb *state.StateDB) error {
+	// 의심점
 	// Calculate the total difficulty of the block
 	ptd := bc.GetTd(block.ParentHash(), block.NumberU64()-1)
 	if ptd == nil {
@@ -1470,7 +1473,7 @@ func (bc *BlockChain) writeBlockWithState(block *types.Block, receipts []*types.
 	rawdb.WriteBlock(blockBatch, block)
 	rawdb.WriteReceipts(blockBatch, block.Hash(), block.NumberU64(), receipts)
 	rawdb.WritePreimages(blockBatch, statedb.Preimages())
-	if err := blockBatch.Write(); err != nil {
+	if err := blockBatch.Write(311); err != nil {
 		log.Crit("Failed to write block into disk", "err", err)
 	}
 	// Commit all cached state changes into underlying memory database.
@@ -1770,7 +1773,7 @@ func (bc *BlockChain) insertChain(chain types.Blocks, setHead bool) (int, error)
 			// state, but if it's this special case here(skip reexecution) we will lose
 			// the empty receipt entry.
 			if len(block.Transactions()) == 0 {
-				rawdb.WriteReceipts(bc.db, block.Hash(), block.NumberU64(), nil)
+				rawdb.WriteReceipts(bc.db, block.Hash(), block.NumberU64(), nil) // 의심점
 			} else {
 				log.Error("Please file an issue, skip known block execution without receipt",
 					"hash", block.Hash(), "number", block.NumberU64())
@@ -2329,7 +2332,7 @@ func (bc *BlockChain) reorg(oldHead *types.Header, newHead *types.Block) error {
 		}
 		rawdb.DeleteCanonicalHash(indexesBatch, i)
 	}
-	if err := indexesBatch.Write(); err != nil {
+	if err := indexesBatch.Write(321); err != nil {
 		log.Crit("Failed to delete useless indexes", "err", err)
 	}
 	// Reset the tx lookup cache to clear stale txlookup cache.

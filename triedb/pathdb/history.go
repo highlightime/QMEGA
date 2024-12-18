@@ -575,7 +575,7 @@ func truncateFromHead(db ethdb.Batcher, store ethdb.AncientStore, nhead uint64) 
 		}
 		rawdb.DeleteStateID(batch, m.root)
 	}
-	if err := batch.Write(); err != nil {
+	if err := batch.Write(101); err != nil {
 		return 0, err
 	}
 	ohead, err = store.TruncateHead(nhead)
@@ -617,7 +617,7 @@ func truncateFromTail(db ethdb.Batcher, store ethdb.AncientStore, ntail uint64) 
 		}
 		rawdb.DeleteStateID(batch, m.root)
 	}
-	if err := batch.Write(); err != nil {
+	if err := batch.Write(111); err != nil {
 		return 0, err
 	}
 	otail, err = store.TruncateTail(ntail)

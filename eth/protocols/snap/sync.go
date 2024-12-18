@@ -638,7 +638,7 @@ func (s *Syncer) Sync(root common.Hash, cancel chan struct{}) error {
 	// Flush out the last committed raw states
 	defer func() {
 		if s.stateWriter.ValueSize() > 0 {
-			s.stateWriter.Write()
+			s.stateWriter.Write(371)
 			s.stateWriter.Reset()
 		}
 	}()
@@ -883,7 +883,7 @@ func (s *Syncer) saveSyncStatus() {
 		// accumulated nodes in batch, the nodes on right boundary
 		// will be discarded and cleaned up by this call.
 		task.genTrie.commit(false)
-		if err := task.genBatch.Write(); err != nil {
+		if err := task.genBatch.Write(381); err != nil {
 			log.Error("Failed to persist account slots", "err", err)
 		}
 		for _, subtasks := range task.SubTasks {
@@ -891,7 +891,7 @@ func (s *Syncer) saveSyncStatus() {
 				// Same for account trie, discard and cleanup the
 				// incomplete right boundary.
 				subtask.genTrie.commit(false)
-				if err := subtask.genBatch.Write(); err != nil {
+				if err := subtask.genBatch.Write(382); err != nil {
 					log.Error("Failed to persist storage slots", "err", err)
 				}
 			}
@@ -2015,7 +2015,7 @@ func (s *Syncer) processBytecodeResponse(res *bytecodeResponse) {
 		rawdb.WriteCode(batch, hash, code)
 	}
 	bytes := common.StorageSize(batch.ValueSize())
-	if err := batch.Write(); err != nil {
+	if err := batch.Write(391); err != nil {
 		log.Crit("Failed to persist bytecodes", "err", err)
 	}
 	s.bytecodeSynced += codes
@@ -2231,7 +2231,7 @@ func (s *Syncer) processStorageResponse(res *storageResponse) {
 	if res.subTask != nil {
 		if res.subTask.done {
 			root := res.subTask.genTrie.commit(res.subTask.Last == common.MaxHash)
-			if err := res.subTask.genBatch.Write(); err != nil {
+			if err := res.subTask.genBatch.Write(401); err != nil {
 				log.Error("Failed to persist stack slots", "err", err)
 			}
 			res.subTask.genBatch.Reset()
@@ -2249,14 +2249,14 @@ func (s *Syncer) processStorageResponse(res *storageResponse) {
 			}
 		} else if res.subTask.genBatch.ValueSize() > batchSizeThreshold {
 			res.subTask.genTrie.commit(false)
-			if err := res.subTask.genBatch.Write(); err != nil {
+			if err := res.subTask.genBatch.Write(402); err != nil {
 				log.Error("Failed to persist stack slots", "err", err)
 			}
 			res.subTask.genBatch.Reset()
 		}
 	}
 	// Flush anything written just now and update the stats
-	if err := batch.Write(); err != nil {
+	if err := batch.Write(403); err != nil {
 		log.Crit("Failed to persist storage slots", "err", err)
 	}
 	s.storageSynced += uint64(slots)
@@ -2360,7 +2360,7 @@ func (s *Syncer) commitHealer(force bool) {
 	if err := s.healer.scheduler.Commit(batch); err != nil {
 		log.Crit("Failed to commit healing data", "err", err)
 	}
-	if err := batch.Write(); err != nil {
+	if err := batch.Write(411); err != nil {
 		log.Crit("Failed to persist healing data", "err", err)
 	}
 	log.Debug("Persisted set of healing data", "type", "trienodes", "bytes", common.StorageSize(batch.ValueSize()))
@@ -2435,7 +2435,7 @@ func (s *Syncer) forwardAccountTask(task *accountTask) {
 		}
 	}
 	// Flush anything written just now and update the stats
-	if err := batch.Write(); err != nil {
+	if err := batch.Write(421); err != nil {
 		log.Crit("Failed to persist accounts", "err", err)
 	}
 	s.accountSynced += uint64(len(res.accounts))
@@ -2465,13 +2465,13 @@ func (s *Syncer) forwardAccountTask(task *accountTask) {
 	// write as it will only cause more data to be downloaded during heal.
 	if task.done {
 		task.genTrie.commit(task.Last == common.MaxHash)
-		if err := task.genBatch.Write(); err != nil {
+		if err := task.genBatch.Write(431); err != nil {
 			log.Error("Failed to persist stack account", "err", err)
 		}
 		task.genBatch.Reset()
 	} else if task.genBatch.ValueSize() > batchSizeThreshold {
 		task.genTrie.commit(false)
-		if err := task.genBatch.Write(); err != nil {
+		if err := task.genBatch.Write(432); err != nil {
 			log.Error("Failed to persist stack account", "err", err)
 		}
 		task.genBatch.Reset()
@@ -3065,7 +3065,7 @@ func (s *Syncer) onHealState(paths [][]byte, value []byte) error {
 		s.storageHealedBytes += common.StorageSize(1 + 2*common.HashLength + len(value))
 	}
 	if s.stateWriter.ValueSize() > ethdb.IdealBatchSize {
-		s.stateWriter.Write() // It's fine to ignore the error here
+		s.stateWriter.Write(441) // It's fine to ignore the error here
 		s.stateWriter.Reset()
 	}
 	return nil

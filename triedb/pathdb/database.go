@@ -319,7 +319,7 @@ func (db *Database) Enable(root common.Hash) error {
 	batch := db.diskdb.NewBatch()
 	rawdb.DeleteTrieJournal(batch)
 	rawdb.WritePersistentStateID(batch, 0)
-	if err := batch.Write(); err != nil {
+	if err := batch.Write(81); err != nil {
 		return err
 	}
 	// Clean up all state histories in freezer. Theoretically

@@ -1319,7 +1319,7 @@ func (s *StateDB) commitAndFlush(block uint64, deleteEmptyObjects bool) (*stateU
 		for _, code := range ret.codes {
 			rawdb.WriteCode(batch, code.hash, code.blob)
 		}
-		if err := batch.Write(); err != nil {
+		if err := batch.Write(261); err != nil {
 			return nil, err
 		}
 	}

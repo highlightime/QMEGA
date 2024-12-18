@@ -355,7 +355,7 @@ func (db *Database) Cap(limit common.StorageSize) error {
 
 		// If we exceeded the ideal batch size, commit and reset
 		if batch.ValueSize() >= ethdb.IdealBatchSize {
-			if err := batch.Write(); err != nil {
+			if err := batch.Write(51); err != nil {
 				log.Error("Failed to write flush list to disk", "err", err)
 				return err
 			}
@@ -371,7 +371,7 @@ func (db *Database) Cap(limit common.StorageSize) error {
 		oldest = node.flushNext
 	}
 	// Flush out any remainder data from the last batch
-	if err := batch.Write(); err != nil {
+	if err := batch.Write(52); err != nil {
 		log.Error("Failed to write flush list to disk", "err", err)
 		return err
 	}
@@ -426,7 +426,7 @@ func (db *Database) Commit(node common.Hash, report bool) error {
 		return err
 	}
 	// Trie mostly committed to disk, flush any batch leftovers
-	if err := batch.Write(); err != nil {
+	if err := batch.Write(61); err != nil {
 		log.Error("Failed to write trie to disk", "err", err)
 		return err
 	}
@@ -476,7 +476,7 @@ func (db *Database) commit(hash common.Hash, batch ethdb.Batch, uncacher *cleane
 	// If we've reached an optimal batch size, commit and start over
 	rawdb.WriteLegacyTrieNode(batch, hash, node.node)
 	if batch.ValueSize() >= ethdb.IdealBatchSize {
-		if err := batch.Write(); err != nil {
+		if err := batch.Write(71); err != nil {
 			return err
 		}
 		err := batch.Replay(uncacher)
@@ -499,7 +499,7 @@ type cleaner struct {
 // removed from the dirty cache and moved into the clean cache. The reason behind
 // the two-phase commit is to ensure data availability while moving from memory
 // to disk.
-func (c *cleaner) Put(key []byte, rlp []byte) error {
+func (c *cleaner) Put(idx int, key []byte, rlp []byte) error {
 	hash := common.BytesToHash(key)
 
 	// If the node does not exist, we're done on this path
@@ -537,7 +537,7 @@ func (c *cleaner) Put(key []byte, rlp []byte) error {
 	return nil
 }
 
-func (c *cleaner) Delete(key []byte) error {
+func (c *cleaner) Delete(idx int, key []byte) error {
 	panic("not implemented")
 }
 

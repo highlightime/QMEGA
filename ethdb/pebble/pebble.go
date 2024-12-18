@@ -24,7 +24,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-
+	"encoding/base64"
 	"github.com/cockroachdb/pebble"
 	"github.com/cockroachdb/pebble/bloom"
 	"github.com/ethereum/go-ethereum/common"
@@ -293,6 +293,8 @@ func (d *Database) Has(key []byte) (bool, error) {
 	} else if err != nil {
 		return false, err
 	}
+	// print key
+	fmt.Printf("hk: %s\n", base64.StdEncoding.EncodeToString(key))
 	closer.Close()
 	return true, nil
 }
@@ -310,27 +312,32 @@ func (d *Database) Get(key []byte) ([]byte, error) {
 	}
 	ret := make([]byte, len(dat))
 	copy(ret, dat)
+	// print key
+	fmt.Printf("gk: %s\n", base64.StdEncoding.EncodeToString(key))
 	closer.Close()
 	return ret, nil
 }
 
 // Put inserts the given value into the key-value store.
-func (d *Database) Put(key []byte, value []byte) error {
+func (d *Database) Put(idx int, key []byte, value []byte) error {
 	d.quitLock.RLock()
 	defer d.quitLock.RUnlock()
 	if d.closed {
 		return pebble.ErrClosed
 	}
+	// print size of key and value
+	fmt.Printf("pk: %s z: %d i: %d\n", base64.StdEncoding.EncodeToString(key), len(key)+len(value), idx)
 	return d.db.Set(key, value, d.writeOptions)
 }
 
 // Delete removes the key from the key-value store.
-func (d *Database) Delete(key []byte) error {
+func (d *Database) Delete(idx int, key []byte) error {
 	d.quitLock.RLock()
 	defer d.quitLock.RUnlock()
 	if d.closed {
 		return pebble.ErrClosed
 	}
+	fmt.Printf("dk: %s i: %d\n", base64.StdEncoding.EncodeToString(key), idx)
 	return d.db.Delete(key, nil)
 }
 
@@ -377,6 +384,8 @@ func (snap *snapshot) Has(key []byte) (bool, error) {
 			return false, nil
 		}
 	}
+	// print key
+	fmt.Printf("shk: %s\n", base64.StdEncoding.EncodeToString(key))
 	closer.Close()
 	return true, nil
 }
@@ -390,6 +399,8 @@ func (snap *snapshot) Get(key []byte) ([]byte, error) {
 	}
 	ret := make([]byte, len(dat))
 	copy(ret, dat)
+	// print key
+	fmt.Printf("sgk: %s\n", base64.StdEncoding.EncodeToString(key))
 	closer.Close()
 	return ret, nil
 }
@@ -558,24 +569,43 @@ func (d *Database) meter(refresh time.Duration, namespace string) {
 	errc <- nil
 }
 
+type LOGGING struct {
+	key  string
+	size int
+	idx  int
+}
+
 // batch is a write-only batch that commits changes to its host database
 // when Write is called. A batch cannot be used concurrently.
 type batch struct {
 	b    *pebble.Batch
 	db   *Database
 	size int
+	// keys []LOGGING
+	putkeys []LOGGING
+	delkeys []LOGGING
+}
+
+func printCallStack() {
+	// 1024는 버퍼 크기를 설정합니다. 필요에 따라 조정할 수 있습니다.
+	buf := make([]byte, 1024)
+	n := runtime.Stack(buf, false)
+	fmt.Printf("Call stack:%s\n", buf[:n])
 }
 
 // Put inserts the given value into the batch for later committing.
-func (b *batch) Put(key, value []byte) error {
+func (b *batch) Put(idx int, key, value []byte) error {
 	b.b.Set(key, value, nil)
 	b.size += len(key) + len(value)
+	b.putkeys = append(b.putkeys, LOGGING{key: base64.StdEncoding.EncodeToString(key), size: len(key) + len(value), idx: idx})
+
 	return nil
 }
 
 // Delete inserts the key removal into the batch for later committing.
-func (b *batch) Delete(key []byte) error {
+func (b *batch) Delete(idx int, key []byte) error {
 	b.b.Delete(key, nil)
+	b.delkeys = append(b.delkeys, LOGGING{key: base64.StdEncoding.EncodeToString(key), idx: idx})
 	b.size += len(key)
 	return nil
 }
@@ -586,11 +616,18 @@ func (b *batch) ValueSize() int {
 }
 
 // Write flushes any accumulated data to disk.
-func (b *batch) Write() error {
+func (b *batch) Write(idx int) error {
 	b.db.quitLock.RLock()
 	defer b.db.quitLock.RUnlock()
 	if b.db.closed {
 		return pebble.ErrClosed
+	}
+	// Print Keys with iteration
+	for _, k := range b.putkeys {
+		fmt.Printf("bpk: %s z: %d i: %d\n", k.key, k.size, k.idx)
+	}
+	for _, k := range b.delkeys {
+		fmt.Printf("bdk: %s i: %d\n", k.key, k.idx)
 	}
 	return b.b.Commit(b.db.writeOptions)
 }
@@ -612,9 +649,9 @@ func (b *batch) Replay(w ethdb.KeyValueWriter) error {
 		// The (k,v) slices might be overwritten if the batch is reset/reused,
 		// and the receiver should copy them if they are to be retained long-term.
 		if kind == pebble.InternalKeyKindSet {
-			w.Put(k, v)
+			w.Put(0, k, v)
 		} else if kind == pebble.InternalKeyKindDelete {
-			w.Delete(k)
+			w.Delete(0, k)
 		} else {
 			return fmt.Errorf("unhandled operation, keytype: %v", kind)
 		}
@@ -664,6 +701,7 @@ func (iter *pebbleIterator) Error() error {
 // should not modify the contents of the returned slice, and its contents may
 // change on the next call to Next.
 func (iter *pebbleIterator) Key() []byte {
+	fmt.Printf("ik: %X\n", base64.StdEncoding.EncodeToString(iter.iter.Key()))
 	return iter.iter.Key()
 }
 

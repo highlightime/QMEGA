@@ -179,7 +179,7 @@ func (hc *HeaderChain) Reorg(headers []*types.Header) error {
 	rawdb.WriteCanonicalHash(batch, hash, num)
 	rawdb.WriteHeadHeaderHash(batch, hash)
 
-	if err := batch.Write(); err != nil {
+	if err := batch.Write(361); err != nil {
 		return err
 	}
 	// Last step update all in-memory head header markers
@@ -241,7 +241,7 @@ func (hc *HeaderChain) WriteHeaders(headers []*types.Header) (int, error) {
 		return 0, errors.New("aborted")
 	}
 	// Commit to disk!
-	if err := batch.Write(); err != nil {
+	if err := batch.Write(341); err != nil {
 		log.Crit("Failed to write headers", "error", err)
 	}
 	return len(inserted), nil
@@ -598,7 +598,7 @@ func (hc *HeaderChain) setHead(headBlock uint64, headTime uint64, updateFn Updat
 		}
 		// Update head header then.
 		rawdb.WriteHeadHeaderHash(markerBatch, parentHash)
-		if err := markerBatch.Write(); err != nil {
+		if err := markerBatch.Write(351); err != nil {
 			log.Crit("Failed to update chain markers", "error", err)
 		}
 		hc.currentHeader.Store(parent)
@@ -635,7 +635,7 @@ func (hc *HeaderChain) setHead(headBlock uint64, headTime uint64, updateFn Updat
 		}
 	}
 	// Flush all accumulated deletions.
-	if err := batch.Write(); err != nil {
+	if err := batch.Write(352); err != nil {
 		log.Crit("Failed to rewind block", "error", err)
 	}
 	// Clear out any stale content from the caches

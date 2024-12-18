@@ -31,7 +31,7 @@ func ReadSkeletonSyncStatus(db ethdb.KeyValueReader) []byte {
 
 // WriteSkeletonSyncStatus stores the serialized sync status to save at shutdown.
 func WriteSkeletonSyncStatus(db ethdb.KeyValueWriter, status []byte) {
-	if err := db.Put(skeletonSyncStatusKey, status); err != nil {
+	if err := db.Put(451, skeletonSyncStatusKey, status); err != nil {
 		log.Crit("Failed to store skeleton sync status", "err", err)
 	}
 }
@@ -39,7 +39,7 @@ func WriteSkeletonSyncStatus(db ethdb.KeyValueWriter, status []byte) {
 // DeleteSkeletonSyncStatus deletes the serialized sync status saved at the last
 // shutdown
 func DeleteSkeletonSyncStatus(db ethdb.KeyValueWriter) {
-	if err := db.Delete(skeletonSyncStatusKey); err != nil {
+	if err := db.Delete(-451, skeletonSyncStatusKey); err != nil {
 		log.Crit("Failed to remove skeleton sync status", "err", err)
 	}
 }
@@ -65,14 +65,14 @@ func WriteSkeletonHeader(db ethdb.KeyValueWriter, header *types.Header) {
 		log.Crit("Failed to RLP encode header", "err", err)
 	}
 	key := skeletonHeaderKey(header.Number.Uint64())
-	if err := db.Put(key, data); err != nil {
+	if err := db.Put(461, key, data); err != nil {
 		log.Crit("Failed to store skeleton header", "err", err)
 	}
 }
 
 // DeleteSkeletonHeader removes all block header data associated with a hash.
 func DeleteSkeletonHeader(db ethdb.KeyValueWriter, number uint64) {
-	if err := db.Delete(skeletonHeaderKey(number)); err != nil {
+	if err := db.Delete(-461, skeletonHeaderKey(number)); err != nil {
 		log.Crit("Failed to delete skeleton header", "err", err)
 	}
 }
@@ -94,7 +94,7 @@ func ReadSnapSyncStatusFlag(db ethdb.KeyValueReader) uint8 {
 
 // WriteSnapSyncStatusFlag stores the state snap sync status flag into database.
 func WriteSnapSyncStatusFlag(db ethdb.KeyValueWriter, flag uint8) {
-	if err := db.Put(snapSyncStatusFlagKey, []byte{flag}); err != nil {
+	if err := db.Put(501, snapSyncStatusFlagKey, []byte{flag}); err != nil {
 		log.Crit("Failed to store sync status flag", "err", err)
 	}
 }

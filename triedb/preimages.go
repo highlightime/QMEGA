@@ -79,7 +79,7 @@ func (store *preimageStore) commit(force bool) error {
 	}
 	batch := store.disk.NewBatch()
 	rawdb.WritePreimages(batch, store.preimages)
-	if err := batch.Write(); err != nil {
+	if err := batch.Write(171); err != nil {
 		return err
 	}
 	store.preimages, store.preimagesSize = make(map[common.Hash][]byte), 0

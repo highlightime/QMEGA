@@ -60,7 +60,7 @@ func InitDatabaseFromFreezer(db ethdb.Database) {
 			WriteHeaderNumber(batch, hash, number)
 			// If enough data was accumulated in memory or we're at the last block, dump to disk
 			if batch.ValueSize() > ethdb.IdealBatchSize {
-				if err := batch.Write(); err != nil {
+				if err := batch.Write(21); err != nil {
 					log.Crit("Failed to write data to db", "err", err)
 				}
 				batch.Reset()
@@ -73,7 +73,7 @@ func InitDatabaseFromFreezer(db ethdb.Database) {
 			logged = time.Now()
 		}
 	}
-	if err := batch.Write(); err != nil {
+	if err := batch.Write(22); err != nil {
 		log.Crit("Failed to write data to db", "err", err)
 	}
 	batch.Reset()
@@ -219,7 +219,7 @@ func indexTransactions(db ethdb.Database, from uint64, to uint64, interrupt chan
 			// If enough data was accumulated in memory or we're at the last block, dump to disk
 			if batch.ValueSize() > ethdb.IdealBatchSize {
 				WriteTxIndexTail(batch, lastNum) // Also write the tail here
-				if err := batch.Write(); err != nil {
+				if err := batch.Write(31); err != nil {
 					log.Crit("Failed writing batch to db", "error", err)
 					return
 				}
@@ -236,7 +236,7 @@ func indexTransactions(db ethdb.Database, from uint64, to uint64, interrupt chan
 	// that the last batch is empty because nothing to index, but the tail has to
 	// be flushed anyway.
 	WriteTxIndexTail(batch, lastNum)
-	if err := batch.Write(); err != nil {
+	if err := batch.Write(32); err != nil {
 		log.Crit("Failed writing batch to db", "error", err)
 		return
 	}
@@ -315,7 +315,7 @@ func unindexTransactions(db ethdb.Database, from uint64, to uint64, interrupt ch
 			// often than that.
 			if blocks%1000 == 0 {
 				WriteTxIndexTail(batch, nextNum)
-				if err := batch.Write(); err != nil {
+				if err := batch.Write(41); err != nil {
 					log.Crit("Failed writing batch to db", "error", err)
 					return
 				}
@@ -332,7 +332,7 @@ func unindexTransactions(db ethdb.Database, from uint64, to uint64, interrupt ch
 	// that the last batch is empty because nothing to unindex, but the tail has to
 	// be flushed anyway.
 	WriteTxIndexTail(batch, nextNum)
-	if err := batch.Write(); err != nil {
+	if err := batch.Write(42); err != nil {
 		log.Crit("Failed writing batch to db", "error", err)
 		return
 	}

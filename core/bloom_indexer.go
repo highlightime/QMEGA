@@ -83,7 +83,7 @@ func (b *BloomIndexer) Commit() error {
 		}
 		rawdb.WriteBloomBits(batch, uint(i), b.section, b.head, bitutil.CompressBytes(bits))
 	}
-	return batch.Write()
+	return batch.Write(331)
 }
 
 // Prune returns an empty error since we don't support pruning here.

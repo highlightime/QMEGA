@@ -580,7 +580,7 @@ func (s *skeleton) initSync(head *types.Header) {
 			rawdb.WriteSkeletonHeader(batch, head)
 			s.saveSyncStatus(batch)
 
-			if err := batch.Write(); err != nil {
+			if err := batch.Write(451); err != nil {
 				log.Crit("Failed to write skeleton sync status", "err", err)
 			}
 			return
@@ -603,7 +603,7 @@ func (s *skeleton) initSync(head *types.Header) {
 	rawdb.WriteSkeletonHeader(batch, head)
 	s.saveSyncStatus(batch)
 
-	if err := batch.Write(); err != nil {
+	if err := batch.Write(452); err != nil {
 		log.Crit("Failed to write initial skeleton sync status", "err", err)
 	}
 	log.Debug("Created initial skeleton subchain", "head", number, "tail", number)
@@ -666,7 +666,7 @@ func (s *skeleton) processNewHead(head *types.Header, final *types.Header) error
 	lastchain.Head = number
 	s.saveSyncStatus(batch)
 
-	if err := batch.Write(); err != nil {
+	if err := batch.Write(461); err != nil {
 		log.Crit("Failed to write skeleton sync status", "err", err)
 	}
 	return nil
@@ -1096,7 +1096,7 @@ func (s *skeleton) processResponse(res *headerResponse) (linked bool, merged boo
 		}
 	}
 	s.saveSyncStatus(batch)
-	if err := batch.Write(); err != nil {
+	if err := batch.Write(470); err != nil {
 		log.Crit("Failed to write skeleton headers and progress", "err", err)
 	}
 	// Print a progress report making the UX a bit nicer
@@ -1189,7 +1189,7 @@ func (s *skeleton) cleanStales(filled *types.Header) error {
 			s.progress.Subchains[0].Next = rawdb.ReadSkeletonHeader(s.db, n).ParentHash
 			s.saveSyncStatus(batch)
 
-			if err := batch.Write(); err != nil {
+			if err := batch.Write(471); err != nil {
 				log.Crit("Failed to write beacon trim data", "err", err)
 			}
 			batch.Reset()
@@ -1200,7 +1200,7 @@ func (s *skeleton) cleanStales(filled *types.Header) error {
 		}
 		rawdb.DeleteSkeletonHeader(batch, n)
 	}
-	if err := batch.Write(); err != nil {
+	if err := batch.Write(472); err != nil {
 		log.Crit("Failed to write beacon trim data", "err", err)
 	}
 	return nil

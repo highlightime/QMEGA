@@ -65,7 +65,7 @@ func generateSnapshot(diskdb ethdb.KeyValueStore, triedb *triedb.Database, cache
 	)
 	rawdb.WriteSnapshotRoot(batch, root)
 	journalProgress(batch, genMarker, stats)
-	if err := batch.Write(); err != nil {
+	if err := batch.Write(201); err != nil {
 		log.Crit("Failed to write initialized state marker", "err", err)
 	}
 	base := &diskLayer{
@@ -488,7 +488,7 @@ func (dl *diskLayer) checkAndFlush(ctx *generatorContext, current []byte) error 
 		// generation indeed makes progress.
 		journalProgress(ctx.batch, current, ctx.stats)
 
-		if err := ctx.batch.Write(); err != nil {
+		if err := ctx.batch.Write(211); err != nil {
 			return err
 		}
 		ctx.batch.Reset()
@@ -698,7 +698,7 @@ func (dl *diskLayer) generate(stats *generatorStats) {
 	// Note even there is nothing to commit, persist the
 	// generator anyway to mark the snapshot is complete.
 	journalProgress(ctx.batch, nil, stats)
-	if err := ctx.batch.Write(); err != nil {
+	if err := ctx.batch.Write(221); err != nil {
 		log.Error("Failed to flush batch", "err", err)
 
 		abort = <-dl.genAbort

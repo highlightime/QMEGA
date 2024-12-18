@@ -29,7 +29,7 @@ type Batch interface {
 	ValueSize() int
 
 	// Write flushes any accumulated data to disk.
-	Write() error
+	Write(idx int) error
 
 	// Reset resets the batch for reuse.
 	Reset()
@@ -58,17 +58,17 @@ type HookedBatch struct {
 }
 
 // Put inserts the given value into the key-value data store.
-func (b HookedBatch) Put(key []byte, value []byte) error {
+func (b HookedBatch) Put(idx int, key []byte, value []byte) error {
 	if b.OnPut != nil {
 		b.OnPut(key, value)
 	}
-	return b.Batch.Put(key, value)
+	return b.Batch.Put(idx, key, value)
 }
 
 // Delete removes the key from the key-value data store.
-func (b HookedBatch) Delete(key []byte) error {
+func (b HookedBatch) Delete(idx int, key []byte) error {
 	if b.OnDelete != nil {
 		b.OnDelete(key)
 	}
-	return b.Batch.Delete(key)
+	return b.Batch.Delete(idx, key)
 }

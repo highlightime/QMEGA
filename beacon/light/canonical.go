@@ -82,7 +82,7 @@ func (cs *canonicalStore[T]) add(backend ethdb.KeyValueWriter, period uint64, va
 	if err != nil {
 		return err
 	}
-	if err := backend.Put(cs.databaseKey(period), enc); err != nil {
+	if err := backend.Put(551, cs.databaseKey(period), enc); err != nil {
 		return err
 	}
 	cs.cache.Add(period, value)
@@ -94,7 +94,7 @@ func (cs *canonicalStore[T]) add(backend ethdb.KeyValueWriter, period uint64, va
 func (cs *canonicalStore[T]) deleteFrom(db ethdb.KeyValueWriter, fromPeriod uint64) (deleted periodRange) {
 	keepRange, deleteRange := cs.periods.split(fromPeriod)
 	deleteRange.each(func(period uint64) {
-		db.Delete(cs.databaseKey(period))
+		db.Delete(-551, cs.databaseKey(period))
 		cs.cache.Remove(period)
 	})
 	cs.periods = keepRange

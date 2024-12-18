@@ -743,14 +743,14 @@ func ImportLDBData(db ethdb.Database, f string, startIndex int64, interrupt chan
 		}
 		switch op {
 		case OpBatchDel:
-			batch.Delete(key)
+			batch.Delete(-711, key)
 		case OpBatchAdd:
-			batch.Put(key, val)
+			batch.Put(711, key, val)
 		default:
 			return fmt.Errorf("unknown op %d", op)
 		}
 		if batch.ValueSize() > ethdb.IdealBatchSize {
-			if err := batch.Write(); err != nil {
+			if err := batch.Write(481); err != nil {
 				return err
 			}
 			batch.Reset()
@@ -759,7 +759,7 @@ func ImportLDBData(db ethdb.Database, f string, startIndex int64, interrupt chan
 		if count%1000 == 0 {
 			select {
 			case <-interrupt:
-				if err := batch.Write(); err != nil {
+				if err := batch.Write(482); err != nil {
 					return err
 				}
 				log.Info("External data import interrupted", "file", f, "count", count, "elapsed", common.PrettyDuration(time.Since(start)))
@@ -775,7 +775,7 @@ func ImportLDBData(db ethdb.Database, f string, startIndex int64, interrupt chan
 	}
 	// Flush the last batch snapshot data
 	if batch.ValueSize() > 0 {
-		if err := batch.Write(); err != nil {
+		if err := batch.Write(483); err != nil {
 			return err
 		}
 	}

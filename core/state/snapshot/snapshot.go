@@ -299,7 +299,7 @@ func (t *Tree) Disable() {
 	rawdb.DeleteSnapshotRecoveryNumber(batch)
 	// Note, we don't delete the sync progress
 
-	if err := batch.Write(); err != nil {
+	if err := batch.Write(231); err != nil {
 		log.Crit("Failed to disable snapshots", "err", err)
 	}
 }
@@ -565,7 +565,7 @@ func diffToDisk(bottom *diffLayer) *diskLayer {
 		it := rawdb.IterateStorageSnapshots(base.diskdb, hash)
 		for it.Next() {
 			key := it.Key()
-			batch.Delete(key)
+			batch.Delete(-531, key)
 			base.cache.Del(key[1:])
 			snapshotFlushStorageItemMeter.Mark(1)
 
@@ -573,7 +573,7 @@ func diffToDisk(bottom *diffLayer) *diskLayer {
 			// huge). It's ok to flush, the root will go missing in case of a
 			// crash and we'll detect and regenerate the snapshot.
 			if batch.ValueSize() > 64*1024*1024 {
-				if err := batch.Write(); err != nil {
+				if err := batch.Write(241); err != nil {
 					log.Crit("Failed to write storage deletions", "err", err)
 				}
 				batch.Reset()
@@ -599,7 +599,7 @@ func diffToDisk(bottom *diffLayer) *diskLayer {
 		// root will go missing in case of a crash and we'll detect and regen
 		// the snapshot.
 		if batch.ValueSize() > 64*1024*1024 {
-			if err := batch.Write(); err != nil {
+			if err := batch.Write(242); err != nil {
 				log.Crit("Failed to write storage deletions", "err", err)
 			}
 			batch.Reset()
@@ -639,7 +639,7 @@ func diffToDisk(bottom *diffLayer) *diskLayer {
 
 	// Flush all the updates in the single db operation. Ensure the
 	// disk layer transition is atomic.
-	if err := batch.Write(); err != nil {
+	if err := batch.Write(243); err != nil {
 		log.Crit("Failed to write leftover snapshot", "err", err)
 	}
 	log.Debug("Journalled disk layer", "root", bottom.root, "complete", base.genMarker == nil)
