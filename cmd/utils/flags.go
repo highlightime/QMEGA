@@ -137,6 +137,18 @@ var (
 		Value:    ethconfig.Defaults.NetworkId,
 		Category: flags.EthCategory,
 	}
+	ThresholdFlag = &cli.Uint64Flag{
+		Name:     "threshold",
+		Usage:    "Threshold for the hot db storage",
+		Value:    ethconfig.Defaults.Threshold,
+		Category: flags.EthCategory,
+	}
+	EvictionRateFlag = &cli.Uint64Flag{
+		Name:     "evictionrate",
+		Usage:    "Eviction rate for the hot db storage",
+		Value:    ethconfig.Defaults.EvictionRate,
+		Category: flags.EthCategory,
+	}
 	MainnetFlag = &cli.BoolFlag{
 		Name:     "mainnet",
 		Usage:    "Ethereum mainnet",
@@ -979,6 +991,8 @@ var (
 		DBEngineFlag,
 		StateSchemeFlag,
 		HttpHeaderFlag,
+		ThresholdFlag,
+		EvictionRateFlag,
 	}
 )
 
@@ -1447,6 +1461,20 @@ func SetNodeConfig(ctx *cli.Context, cfg *node.Config) {
 		}
 		log.Info(fmt.Sprintf("Using %s as db engine", dbEngine))
 		cfg.DBEngine = dbEngine
+	}
+	if ctx.IsSet(ThresholdFlag.Name) {
+		threshold := ctx.Int(ThresholdFlag.Name)
+		if threshold < 0 {
+			Fatalf("threshold cannot be negative")
+		}
+		cfg.Threshold = uint64(threshold)
+	}
+	if ctx.IsSet(EvictionRateFlag.Name) {
+		evictionRate := ctx.Int(EvictionRateFlag.Name)
+		if evictionRate < 0 {
+			Fatalf("eviction rate cannot be negative")
+		}
+		cfg.EvictionRate = uint64(evictionRate)
 	}
 	// deprecation notice for log debug flags (TODO: find a more appropriate place to put these?)
 	if ctx.IsSet(LogBacktraceAtFlag.Name) {

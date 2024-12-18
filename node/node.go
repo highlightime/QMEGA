@@ -724,12 +724,14 @@ func (n *Node) OpenDatabase(name string, cache, handles int, namespace string, r
 		db = rawdb.NewMemoryDatabase()
 	} else {
 		db, err = rawdb.Open(rawdb.OpenOptions{
-			Type:      n.config.DBEngine,
-			Directory: n.ResolvePath(name),
-			Namespace: namespace,
-			Cache:     cache,
-			Handles:   handles,
-			ReadOnly:  readonly,
+			Type:         n.config.DBEngine,
+			Directory:    n.ResolvePath(name),
+			Namespace:    namespace,
+			Cache:        cache,
+			Handles:      handles,
+			ReadOnly:     readonly,
+			Threshold:    int(n.config.Threshold),
+			EvictionRate: int(n.config.EvictionRate),
 		})
 	}
 
@@ -763,6 +765,8 @@ func (n *Node) OpenDatabaseWithFreezer(name string, cache, handles int, ancient 
 			Cache:             cache,
 			Handles:           handles,
 			ReadOnly:          readonly,
+			Threshold:         int(n.config.Threshold),
+			EvictionRate:      int(n.config.EvictionRate),
 		})
 	}
 

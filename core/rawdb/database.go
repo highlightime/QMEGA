@@ -325,8 +325,12 @@ func NewLevelDBDatabase(file string, cache int, handles int, namespace string, r
 
 // NewPebbleDBDatabase creates a persistent key-value database without a freezer
 // moving immutable chain segments into cold storage.
-func NewPebbleDBDatabase(file string, cache int, handles int, namespace string, readonly, ephemeral bool) (ethdb.Database, error) {
-	db, err := pebble.New(file, cache, handles, namespace, readonly, ephemeral)
+// linas
+func NewPebbleDBDatabase(file string, cache int, handles int, namespace string, readonly, ephemeral bool, threshold int, evictionRate int) (ethdb.Database, error) {
+	// db, err := pebble.New(file, cache, handles, namespace, readonly, ephemeral)
+	// hddPath := "/home/yhseo/hard/ethereum/execution/data"
+	hddPath := "/home/yhseo/nvme/ethereum/execution/data/geth/chaindata/ancient/chain"
+	db, err := pebble.New(evictionRate, threshold, file, hddPath, cache, handles, namespace, readonly, ephemeral)
 	if err != nil {
 		return nil, err
 	}
@@ -366,7 +370,9 @@ type OpenOptions struct {
 	ReadOnly          bool
 	// Ephemeral means that filesystem sync operations should be avoided: data integrity in the face of
 	// a crash is not important. This option should typically be used in tests.
-	Ephemeral bool
+	Ephemeral    bool
+	Threshold    int // linas
+	EvictionRate int // linas
 }
 
 // openKeyValueDatabase opens a disk-based key-value database, e.g. leveldb or pebble.
@@ -388,7 +394,7 @@ func openKeyValueDatabase(o OpenOptions) (ethdb.Database, error) {
 	}
 	if o.Type == dbPebble || existingDb == dbPebble {
 		log.Info("Using pebble as the backing database")
-		return NewPebbleDBDatabase(o.Directory, o.Cache, o.Handles, o.Namespace, o.ReadOnly, o.Ephemeral)
+		return NewPebbleDBDatabase(o.Directory, o.Cache, o.Handles, o.Namespace, o.ReadOnly, o.Ephemeral, o.Threshold, o.EvictionRate)
 	}
 	if o.Type == dbLeveldb || existingDb == dbLeveldb {
 		log.Info("Using leveldb as the backing database")
@@ -396,7 +402,7 @@ func openKeyValueDatabase(o OpenOptions) (ethdb.Database, error) {
 	}
 	// No pre-existing database, no user-requested one either. Default to Pebble.
 	log.Info("Defaulting to pebble as the backing database")
-	return NewPebbleDBDatabase(o.Directory, o.Cache, o.Handles, o.Namespace, o.ReadOnly, o.Ephemeral)
+	return NewPebbleDBDatabase(o.Directory, o.Cache, o.Handles, o.Namespace, o.ReadOnly, o.Ephemeral, o.Threshold, o.EvictionRate)
 }
 
 // Open opens both a disk-based key-value database such as leveldb or pebble, but also
@@ -405,6 +411,7 @@ func openKeyValueDatabase(o OpenOptions) (ethdb.Database, error) {
 // The passed o.AncientDir indicates the path of root ancient directory where
 // the chain freezer can be opened.
 func Open(o OpenOptions) (ethdb.Database, error) {
+	fmt.Println("OpenOptions: ", o.EvictionRate, o.Threshold)
 	kvdb, err := openKeyValueDatabase(o)
 	if err != nil {
 		return nil, err
