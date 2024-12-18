@@ -88,9 +88,10 @@ type Database struct {
 
 	levelsGauge []metrics.Gauge // Gauge for tracking the number of tables in levels
 
-	quitLock sync.RWMutex    // Mutex protecting the quit channel and the closed flag
-	quitChan chan chan error // Quit channel to stop the metrics collection before closing the database
-	closed   bool            // keep track of whether we're Closed
+	quitLock     sync.RWMutex // Mutex protecting the quit channel and the closed flag
+	quitColdLock sync.RWMutex
+	quitChan     chan chan error // Quit channel to stop the metrics collection before closing the database
+	closed       bool            // keep track of whether we're Closed
 
 	log log.Logger // Contextual logger tracking the database path
 
@@ -107,8 +108,7 @@ type Database struct {
 
 	writeOptions *pebble.WriteOptions
 
-	kvCnt        atomic.Int64
-	evictionLock sync.Mutex
+	kvCnt atomic.Int64
 }
 
 func (d *Database) onCompactionBegin(info pebble.CompactionInfo) {
@@ -433,8 +433,8 @@ func (d *Database) Put(key []byte, value []byte) error {
 }
 
 func (d *Database) GetCold(key []byte) ([]byte, error) {
-	d.quitLock.RLock()
-	defer d.quitLock.RUnlock()
+	d.quitColdLock.RLock()
+	defer d.quitColdLock.RUnlock()
 	if d.closed {
 		return nil, pebble.ErrClosed
 	}
@@ -795,9 +795,6 @@ func getValueFromVT(value []byte) []byte {
 }
 
 func (d *Database) evictOldEntries() error {
-	// d.evictionLock.Lock()
-	// defer d.evictionLock.Unlock()
-
 	// get oldest time key from hotDb
 	iter := d.NewIterator([]byte("t:"), nil).(*pebbleIterator)
 	defer iter.Release()
@@ -856,8 +853,8 @@ func (d *Database) evictOldEntries() error {
 }
 
 func (b *batch) CommitCold() error {
-	b.db.quitLock.RLock()
-	defer b.db.quitLock.RUnlock()
+	b.db.quitColdLock.RLock()
+	defer b.db.quitColdLock.RUnlock()
 	if b.db.closed {
 		return pebble.ErrClosed
 	}
@@ -870,17 +867,18 @@ func (b *batch) CommitCold() error {
 
 func (b *batch) Write() error {
 	b.db.quitLock.RLock()
-	defer b.db.quitLock.RUnlock()
 	if b.db.closed {
+		b.db.quitLock.RUnlock()
 		return pebble.ErrClosed
 	}
 	if err := b.bHot.Commit(b.db.writeOptions); err != nil {
 		fmt.Println("dbHot Batch Write Error:", err)
 		return err
 	}
-	fmt.Printf("Put Count: %d\n", b.putCnt)
+	b.db.quitLock.RUnlock()
 	b.db.kvCnt.Add(int64(b.putCnt))
-
+	b.db.quitColdLock.RLock()
+	defer b.db.quitColdLock.RUnlock()
 	if err := b.bCold.Commit(b.db.writeOptions); err != nil {
 		fmt.Println("dbCold Batch Write Error:", err)
 		return err

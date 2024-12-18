@@ -328,7 +328,8 @@ func NewLevelDBDatabase(file string, cache int, handles int, namespace string, r
 // linas
 func NewPebbleDBDatabase(file string, cache int, handles int, namespace string, readonly, ephemeral bool, threshold int, evictionRate int) (ethdb.Database, error) {
 	// db, err := pebble.New(file, cache, handles, namespace, readonly, ephemeral)
-	hddPath := "/home/yhseo/hard/ethereum/execution/data"
+	// hddPath := "/home/yhseo/hard/ethereum/execution/data"
+	hddPath := "/home/yhseo/nvme/ethereum/execution/data/geth/chaindata/ancient/chain"
 	db, err := pebble.New(evictionRate, threshold, file, hddPath, cache, handles, namespace, readonly, ephemeral)
 	if err != nil {
 		return nil, err
