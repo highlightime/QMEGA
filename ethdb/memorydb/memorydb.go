@@ -76,7 +76,7 @@ func (db *Database) Close() error {
 }
 
 // Has retrieves if a key is present in the key-value store.
-func (db *Database) Has(key []byte) (bool, error) {
+func (db *Database) Has(idx int, key []byte) (bool, error) {
 	db.lock.RLock()
 	defer db.lock.RUnlock()
 
@@ -88,7 +88,7 @@ func (db *Database) Has(key []byte) (bool, error) {
 }
 
 // Get retrieves the given key if it's present in the key-value store.
-func (db *Database) Get(key []byte) ([]byte, error) {
+func (db *Database) Get(idx int, key []byte) ([]byte, error) {
 	db.lock.RLock()
 	defer db.lock.RUnlock()
 
@@ -354,7 +354,7 @@ func newSnapshot(db *Database) *snapshot {
 
 // Has retrieves if a key is present in the snapshot backing by a key-value
 // data store.
-func (snap *snapshot) Has(key []byte) (bool, error) {
+func (snap *snapshot) Has(idx int, key []byte) (bool, error) {
 	snap.lock.RLock()
 	defer snap.lock.RUnlock()
 
@@ -367,7 +367,7 @@ func (snap *snapshot) Has(key []byte) (bool, error) {
 
 // Get retrieves the given key if it's present in the snapshot backing by
 // key-value data store.
-func (snap *snapshot) Get(key []byte) ([]byte, error) {
+func (snap *snapshot) Get(idx int, key []byte) ([]byte, error) {
 	snap.lock.RLock()
 	defer snap.lock.RUnlock()
 

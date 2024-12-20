@@ -26,7 +26,7 @@ import (
 
 // ReadPreimage retrieves a single preimage of the provided hash.
 func ReadPreimage(db ethdb.KeyValueReader, hash common.Hash) []byte {
-	data, _ := db.Get(preimageKey(hash))
+	data, _ := db.Get(45, preimageKey(hash))
 	return data
 }
 
@@ -49,7 +49,7 @@ func ReadCode(db ethdb.KeyValueReader, hash common.Hash) []byte {
 	if len(data) != 0 {
 		return data
 	}
-	data, _ = db.Get(hash.Bytes())
+	data, _ = db.Get(46, hash.Bytes())
 	return data
 }
 
@@ -57,7 +57,7 @@ func ReadCode(db ethdb.KeyValueReader, hash common.Hash) []byte {
 // The main difference between this function and ReadCode is this function
 // will only check the existence with latest scheme(with prefix).
 func ReadCodeWithPrefix(db ethdb.KeyValueReader, hash common.Hash) []byte {
-	data, _ := db.Get(codeKey(hash))
+	data, _ := db.Get(47, codeKey(hash))
 	return data
 }
 
@@ -69,7 +69,7 @@ func HasCode(db ethdb.KeyValueReader, hash common.Hash) bool {
 	if ok := HasCodeWithPrefix(db, hash); ok {
 		return true
 	}
-	ok, _ := db.Has(hash.Bytes())
+	ok, _ := db.Has(5, hash.Bytes())
 	return ok
 }
 
@@ -77,7 +77,7 @@ func HasCode(db ethdb.KeyValueReader, hash common.Hash) bool {
 // provided code hash is present in the db. This function will only check
 // presence using the prefix-scheme.
 func HasCodeWithPrefix(db ethdb.KeyValueReader, hash common.Hash) bool {
-	ok, _ := db.Has(codeKey(hash))
+	ok, _ := db.Has(6, codeKey(hash))
 	return ok
 }
 
@@ -97,7 +97,7 @@ func DeleteCode(db ethdb.KeyValueWriter, hash common.Hash) {
 
 // ReadStateID retrieves the state id with the provided state root.
 func ReadStateID(db ethdb.KeyValueReader, root common.Hash) *uint64 {
-	data, err := db.Get(stateIDKey(root))
+	data, err := db.Get(48, stateIDKey(root))
 	if err != nil || len(data) == 0 {
 		return nil
 	}
@@ -123,7 +123,7 @@ func DeleteStateID(db ethdb.KeyValueWriter, root common.Hash) {
 
 // ReadPersistentStateID retrieves the id of the persistent state from the database.
 func ReadPersistentStateID(db ethdb.KeyValueReader) uint64 {
-	data, _ := db.Get(persistentStateIDKey)
+	data, _ := db.Get(49, persistentStateIDKey)
 	if len(data) != 8 {
 		return 0
 	}
@@ -140,7 +140,7 @@ func WritePersistentStateID(db ethdb.KeyValueWriter, number uint64) {
 // ReadTrieJournal retrieves the serialized in-memory trie nodes of layers saved at
 // the last shutdown.
 func ReadTrieJournal(db ethdb.KeyValueReader) []byte {
-	data, _ := db.Get(trieJournalKey)
+	data, _ := db.Get(50, trieJournalKey)
 	return data
 }
 
