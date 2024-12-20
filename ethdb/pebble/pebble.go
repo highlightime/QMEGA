@@ -51,6 +51,11 @@ const (
 	degradationWarnInterval = time.Minute
 )
 
+var (
+	prefixSSD = []byte{'h'}
+	prefixHDD = []byte{'s'}
+)
+
 // Database is a persistent key-value store based on the pebble storage engine.
 // Apart from basic data storage functionality it also supports batch writes and
 // iterating over the keyspace in binary-alphabetical order.
@@ -307,6 +312,7 @@ func (d *Database) Has(key []byte) (bool, error) {
 	if d.closed {
 		return false, pebble.ErrClosed
 	}
+	key = append(prefixSSD, key...)
 	_, closer, err := d.hotDb.Get(key)
 	if err == pebble.ErrNotFound {
 		// check cold db if key is not found in hot db
@@ -331,6 +337,7 @@ func (d *Database) Get(key []byte) ([]byte, error) {
 	if d.closed {
 		return nil, pebble.ErrClosed
 	}
+	key = append(prefixSSD, key...)
 	dat, closer, err := d.hotDb.Get(key)
 	if err != nil {
 		// check cold db if key is not found in hot db
@@ -354,6 +361,7 @@ func (d *Database) GetCold(key []byte) ([]byte, error) {
 	if d.closed {
 		return nil, pebble.ErrClosed
 	}
+	key = append(prefixHDD, key...)
 	dat, closer, err := d.coldDb.Get(key)
 	if err != nil {
 		return nil, err
@@ -424,13 +432,13 @@ func (d *Database) NewSnapshot() (ethdb.Snapshot, error) {
 
 // Has checks if the given key is present in either the hot or cold snapshot.
 func (snap *snapshot) Has(key []byte) (bool, error) {
-	// Check in hot snapshot
-	if has, err := snap.hasInSnapshot(snap.dbCold, key); err != nil || has {
+	key = append(prefixSSD, key...)
+	if has, err := snap.hasInSnapshot(snap.dbHot, key); err != nil || has {
 		return has, err
 	}
 
-	// Check in cold snapshot
-	return snap.hasInSnapshot(snap.dbHot, key)
+	key = append(prefixHDD, key...)
+	return snap.hasInSnapshot(snap.dbCold, key)
 }
 
 func (snap *snapshot) hasInSnapshot(snapDb *pebble.Snapshot, key []byte) (bool, error) {
@@ -447,15 +455,15 @@ func (snap *snapshot) hasInSnapshot(snapDb *pebble.Snapshot, key []byte) (bool, 
 
 // Get retrieves the given key if it's present in either the hot or cold snapshot.
 func (snap *snapshot) Get(key []byte) ([]byte, error) {
-	// Try to get from hot snapshot
-	if data, err := snap.getFromSnapshot(snap.dbCold, key); err == nil {
+	key = append(prefixSSD, key...)
+	if data, err := snap.getFromSnapshot(snap.dbHot, key); err == nil {
 		return data, nil
 	} else if err != pebble.ErrNotFound {
 		return nil, err
 	}
 
-	// Try to get from cold snapshot
-	return snap.getFromSnapshot(snap.dbHot, key)
+	key = append(prefixHDD, key...)
+	return snap.getFromSnapshot(snap.dbCold, key)
 }
 
 // getFromSnapshot is a helper function to get a key from a given snapshot.
@@ -699,47 +707,15 @@ func isPutHDD(idx int) bool {
 	return false
 }
 
-func isGetHDD(idx int) bool {
-	var trieIdx = []int{471, 481, 491}
-	var snapshotIdx = []int{291, 301, 311, 331, 341, 351}
-	for _, i := range trieIdx {
-		if i == idx {
-			return true
-		}
-	}
-	for _, i := range snapshotIdx {
-		if i == idx {
-			return true
-		}
-	}
-	return false
-}
-
-func isDelHDD(idx int) bool {
-	var trieIdx = []int{-471, -481, -491}
-	var snapshotIdx = []int{-291, -301, -311, -331, -341, -351}
-	for _, i := range trieIdx {
-		if i == idx {
-			return true
-		}
-	}
-	for _, i := range snapshotIdx {
-		if i == idx {
-			return true
-		}
-	}
-	return false
-}
-
 // Put inserts the given value into the batch for later committing.
 func (b *batch) Put(idx int, key, value []byte) error {
 	if isPutHDD(idx) {
-		b.bCold.Set(key, value, nil)
-		b.sizeCold += len(key) + len(value)
+		key = append([]byte{'h'}, key...)
 	} else {
-		b.bHot.Set(key, value, nil)
-		b.sizeHot += len(key) + len(value)
+		key = append([]byte{'s'}, key...)
 	}
+	b.bHot.Set(key, value, nil)
+	b.sizeHot += len(key) + len(value)
 	// b.putkeys = append(b.putkeys, LOGGING{key: base64.StdEncoding.EncodeToString(key), size: len(key) + len(value), idx: idx})
 
 	return nil
@@ -747,13 +723,13 @@ func (b *batch) Put(idx int, key, value []byte) error {
 
 // Delete inserts the key removal into the batch for later committing.
 func (b *batch) Delete(idx int, key []byte) error {
-	if isDelHDD(idx) {
-		b.bCold.Delete(key, nil)
-		b.sizeCold += len(key)
-	} else {
-		b.bHot.Delete(key, nil)
-		b.sizeHot += len(key)
-	}
+	keyCold := append([]byte{'h'}, key...)
+	b.bCold.Delete(keyCold, nil)
+	b.sizeCold += len(keyCold)
+
+	keyHot := append([]byte{'s'}, key...)
+	b.bHot.Delete(keyHot, nil)
+	b.sizeHot += len(keyHot)
 
 	// b.delkeys = append(b.delkeys, LOGGING{key: base64.StdEncoding.EncodeToString(key), idx: idx})
 
@@ -849,13 +825,15 @@ type pebbleIterator struct {
 // of database content with a particular key prefix, starting at a particular
 // initial key (or after, if it does not exist).
 func (d *Database) NewIterator(prefix []byte, start []byte) ethdb.Iterator {
+	prefixHot := append(prefixSSD, prefix...)
+	prefixCold := append(prefixHDD, prefix...)
 	iterHot, _ := d.hotDb.NewIter(&pebble.IterOptions{
-		LowerBound: append(prefix, start...),
-		UpperBound: upperBound(prefix),
+		LowerBound: append(prefixHot, start...),
+		UpperBound: upperBound(prefixHot),
 	})
 	iterCold, _ := d.coldDb.NewIter(&pebble.IterOptions{
-		LowerBound: append(prefix, start...),
-		UpperBound: upperBound(prefix),
+		LowerBound: append(prefixCold, start...),
+		UpperBound: upperBound(prefixCold),
 	})
 	iterHot.First()
 	iterCold.First()
@@ -935,14 +913,14 @@ func (iter *pebbleIterator) Next() bool {
 
 func (iter *pebbleIterator) KeyHot() []byte {
 	if iter.validHot {
-		return iter.iterHot.Key()
+		return iter.iterHot.Key()[1:]
 	}
 	return nil
 }
 
 func (iter *pebbleIterator) KeyCold() []byte {
 	if iter.validCold {
-		return iter.iterCold.Key()
+		return iter.iterCold.Key()[1:]
 	}
 	return nil
 }
@@ -962,9 +940,9 @@ func (iter *pebbleIterator) Error() error {
 func (iter *pebbleIterator) Key() []byte {
 	// fmt.Printf("ik: %X\n", base64.StdEncoding.EncodeToString(iter.iter.Key()))
 	if iter.turnHot {
-		return iter.iterHot.Key()
+		return iter.iterHot.Key()[1:]
 	} else {
-		return iter.iterCold.Key()
+		return iter.iterCold.Key()[1:]
 	}
 }
 
