@@ -52,8 +52,8 @@ const (
 )
 
 var (
-	prefixSSD = []byte{'h'}
-	prefixHDD = []byte{'s'}
+	prefixSSD = []byte{'s'}
+	prefixHDD = []byte{'h'}
 )
 
 // Database is a persistent key-value store based on the pebble storage engine.
@@ -272,7 +272,115 @@ func New(file1, file2 string, cache int, handles int, namespace string, readonly
 
 	// Start up the metrics gathering and return
 	go db.meter(metricsGatheringInterval, namespace)
+	go db.BackgroundMigration()
 	return db, nil
+}
+
+const TIME_INTERVAL = 1
+
+func (d *Database) BackgroundMigration() {
+	var errc chan error
+	ticker := time.NewTicker(TIME_INTERVAL * time.Second)
+	defer ticker.Stop()
+
+	go func() {
+		for i := 1; errc == nil; i++ {
+			select {
+			case <-ticker.C:
+				if err := d.backgroundMigration(); err != nil {
+					d.log.Error("Background Migration Failed", "err", err)
+				} else {
+					fmt.Println("Background Migration Success")
+				}
+			case errc = <-d.quitChan:
+			}
+		}
+	}()
+
+	select {}
+}
+
+func (d *Database) backgroundMigration() error {
+	iter := d.NewIteratorForMigration(prefixHDD, nil).(*pebbleIterator)
+	defer iter.ReleaseHotHDD()
+	batchHot := d.hotDb.NewBatch()
+	defer batchHot.Close()
+	batchCold := &batch{
+		bHot:  d.hotDb.NewBatch(),
+		bCold: d.coldDb.NewBatch(),
+		db:    d,
+	}
+	i := 0
+	for iter.NextHot() {
+		key := iter.Key()
+		value := iter.Value()
+		keyPrefixHDD := append(prefixHDD, key...)
+		batchCold.PutCold(keyPrefixHDD, value)
+		if err := batchHot.Delete(keyPrefixHDD, d.writeOptions); err != nil {
+			return err
+		}
+		i++
+		if i >= 1000000 {
+			break
+		}
+	}
+	if err := batchCold.CommitCold(); err != nil {
+		return err
+	}
+	if err := batchHot.Commit(d.writeOptions); err != nil {
+		return err
+	}
+	fmt.Println("Eviction Iteration :", i)
+	return nil
+}
+func (d *Database) NewIteratorForMigration(prefix []byte, start []byte) ethdb.Iterator {
+	iterHotHDD, _ := d.hotDb.NewIter(&pebble.IterOptions{
+		LowerBound: append(prefix, start...),
+		UpperBound: upperBound(prefix),
+	})
+	iterHotHDD.First()
+	return &pebbleIterator{
+		iterHotHDD:     iterHotHDD,
+		moved:          true,
+		released:       false,
+		movedHotSSD:    true,
+		movedHotHDD:    true,
+		movedCold:      true,
+		releasedHotSSD: false,
+		releasedHotHDD: false,
+		releasedCold:   false,
+		validHotSSD:    false,
+		validHotHDD:    true,
+		validCold:      false,
+		turn:           1,
+	}
+}
+
+func (iter *pebbleIterator) NextHot() bool {
+	if iter.movedHotHDD {
+		iter.movedHotHDD = false
+		return iter.iterHotHDD.Valid()
+	}
+	return iter.iterHotHDD.Next()
+}
+
+func (b *batch) PutCold(key, value []byte) error {
+	b.bCold.Set(key, value, nil)
+	b.sizeCold += len(key) + len(value)
+	return nil
+}
+
+func (b *batch) CommitCold() error {
+	b.db.quitColdLock.RLock()
+	defer b.db.quitColdLock.RUnlock()
+	if b.db.closed {
+		return pebble.ErrClosed
+	}
+	if err := b.bCold.Commit(b.db.writeOptions); err != nil {
+		fmt.Println("dbCold Batch Write Error:", err)
+		return err
+	}
+	return nil
 }
 
 // Close stops the metrics collection, flushes any pending data to disk and closes
@@ -312,19 +420,23 @@ func (d *Database) Has(key []byte) (bool, error) {
 	if d.closed {
 		return false, pebble.ErrClosed
 	}
-	key = append(prefixSSD, key...)
-	_, closer, err := d.hotDb.Get(key)
-	if err == pebble.ErrNotFound {
+	keyPrefixSSD := append(prefixSSD, key...)
+	keyPrefixHDD := append(prefixHDD, key...)
+	_, closer, err := d.hotDb.Get(keyPrefixSSD)
+	if err != nil {
+		_, closer, err = d.hotDb.Get(keyPrefixHDD)
 		// check cold db if key is not found in hot db
-		_, err = d.GetCold(key)
 		if err == pebble.ErrNotFound {
-			return false, nil
+			_, err = d.GetCold(keyPrefixHDD)
+			if err == pebble.ErrNotFound {
+				return false, nil
+			} else if err != nil {
+				return false, err
+			}
+			return true, nil
 		} else if err != nil {
 			return false, err
 		}
-		return true, nil
-	} else if err != nil {
-		return false, err
 	}
 	defer closer.Close()
 	return true, nil
@@ -337,17 +449,22 @@ func (d *Database) Get(key []byte) ([]byte, error) {
 	if d.closed {
 		return nil, pebble.ErrClosed
 	}
-	key = append(prefixSSD, key...)
-	dat, closer, err := d.hotDb.Get(key)
+	keyPrefixSSD := append(prefixSSD, key...)
+	keyPrefixHDD := append(prefixHDD, key...)
+	dat, closer, err := d.hotDb.Get(keyPrefixSSD)
 	if err != nil {
+		dat, closer, err = d.hotDb.Get(keyPrefixHDD)
+		// fmt.Printf("ghk: %d\n", keyPrefixHDD[0])
 		// check cold db if key is not found in hot db
-		dat, err := d.GetCold(key)
 		if err != nil {
-			return nil, err
+			dat, err := d.GetCold(keyPrefixHDD)
+			if err != nil {
+				return nil, err
+			}
+			ret := make([]byte, len(dat))
+			copy(ret, dat)
+			return ret, nil
 		}
-		ret := make([]byte, len(dat))
-		copy(ret, dat)
-		return ret, nil
 	}
 	ret := make([]byte, len(dat))
 	copy(ret, dat)
@@ -361,7 +478,6 @@ func (d *Database) GetCold(key []byte) ([]byte, error) {
 	if d.closed {
 		return nil, pebble.ErrClosed
 	}
-	key = append(prefixHDD, key...)
 	dat, closer, err := d.coldDb.Get(key)
 	if err != nil {
 		return nil, err
@@ -432,13 +548,16 @@ func (d *Database) NewSnapshot() (ethdb.Snapshot, error) {
 
 // Has checks if the given key is present in either the hot or cold snapshot.
 func (snap *snapshot) Has(key []byte) (bool, error) {
-	key = append(prefixSSD, key...)
-	if has, err := snap.hasInSnapshot(snap.dbHot, key); err != nil || has {
+	keyPrefixSSD := append(prefixSSD, key...)
+	if has, err := snap.hasInSnapshot(snap.dbHot, keyPrefixSSD); err != nil || has {
 		return has, err
 	}
 
-	key = append(prefixHDD, key...)
-	return snap.hasInSnapshot(snap.dbCold, key)
+	keyPrefixHDD := append(prefixHDD, key...)
+	if has, err := snap.hasInSnapshot(snap.dbHot, keyPrefixHDD); err != nil || has {
+		return has, err
+	}
+	return snap.hasInSnapshot(snap.dbCold, keyPrefixHDD)
 }
 
 func (snap *snapshot) hasInSnapshot(snapDb *pebble.Snapshot, key []byte) (bool, error) {
@@ -455,15 +574,20 @@ func (snap *snapshot) hasInSnapshot(snapDb *pebble.Snapshot, key []byte) (bool, 
 
 // Get retrieves the given key if it's present in either the hot or cold snapshot.
 func (snap *snapshot) Get(key []byte) ([]byte, error) {
-	key = append(prefixSSD, key...)
-	if data, err := snap.getFromSnapshot(snap.dbHot, key); err == nil {
+	keyPrefixSSD := append(prefixSSD, key...)
+	if data, err := snap.getFromSnapshot(snap.dbHot, keyPrefixSSD); err == nil {
 		return data, nil
 	} else if err != pebble.ErrNotFound {
 		return nil, err
 	}
 
-	key = append(prefixHDD, key...)
-	return snap.getFromSnapshot(snap.dbCold, key)
+	keyPrefixHDD := append(prefixHDD, key...)
+	if data, err := snap.getFromSnapshot(snap.dbHot, keyPrefixHDD); err == nil {
+		return data, nil
+	} else if err != pebble.ErrNotFound {
+		return nil, err
+	}
+	return snap.getFromSnapshot(snap.dbCold, keyPrefixHDD)
 }
 
 // getFromSnapshot is a helper function to get a key from a given snapshot.
@@ -710,10 +834,11 @@ func isPutHDD(idx int) bool {
 // Put inserts the given value into the batch for later committing.
 func (b *batch) Put(idx int, key, value []byte) error {
 	if isPutHDD(idx) {
-		key = append([]byte{'h'}, key...)
+		key = append(prefixHDD, key...)
 	} else {
-		key = append([]byte{'s'}, key...)
+		key = append(prefixSSD, key...)
 	}
+	// fmt.Printf("pk: %d\n", key[0])
 	b.bHot.Set(key, value, nil)
 	b.sizeHot += len(key) + len(value)
 	// b.putkeys = append(b.putkeys, LOGGING{key: base64.StdEncoding.EncodeToString(key), size: len(key) + len(value), idx: idx})
@@ -723,11 +848,11 @@ func (b *batch) Put(idx int, key, value []byte) error {
 
 // Delete inserts the key removal into the batch for later committing.
 func (b *batch) Delete(idx int, key []byte) error {
-	keyCold := append([]byte{'h'}, key...)
+	keyCold := append(prefixHDD, key...)
 	b.bCold.Delete(keyCold, nil)
 	b.sizeCold += len(keyCold)
 
-	keyHot := append([]byte{'s'}, key...)
+	keyHot := append(prefixSSD, key...)
 	b.bHot.Delete(keyHot, nil)
 	b.sizeHot += len(keyHot)
 
@@ -808,17 +933,21 @@ func replayBatch(batch *pebble.Batch, w ethdb.KeyValueWriter) error {
 //
 // The pebble iterator is not thread-safe.
 type pebbleIterator struct {
-	iterHot      *pebble.Iterator
-	iterCold     *pebble.Iterator
-	movedHot     bool
-	movedCold    bool
-	releasedHot  bool
-	releasedCold bool
-	validHot     bool
-	validCold    bool
-	turnHot      bool
-	moved        bool
-	released     bool
+	iterHotSSD     *pebble.Iterator
+	iterHotHDD     *pebble.Iterator
+	iterCold       *pebble.Iterator
+	movedHotSSD    bool
+	movedHotHDD    bool
+	movedCold      bool
+	releasedHotSSD bool
+	releasedHotHDD bool
+	releasedCold   bool
+	validHotSSD    bool
+	validHotHDD    bool
+	validCold      bool
+	moved          bool
+	released       bool
+	turn           int
 }
 
 // NewIterator creates a binary-alphabetical iterator over a subset
@@ -827,93 +956,173 @@ type pebbleIterator struct {
 func (d *Database) NewIterator(prefix []byte, start []byte) ethdb.Iterator {
 	prefixHot := append(prefixSSD, prefix...)
 	prefixCold := append(prefixHDD, prefix...)
-	iterHot, _ := d.hotDb.NewIter(&pebble.IterOptions{
+	iterHotSSD, _ := d.hotDb.NewIter(&pebble.IterOptions{
 		LowerBound: append(prefixHot, start...),
 		UpperBound: upperBound(prefixHot),
+	})
+	iterHotHDD, _ := d.hotDb.NewIter(&pebble.IterOptions{
+		LowerBound: append(prefixCold, start...),
+		UpperBound: upperBound(prefixCold),
 	})
 	iterCold, _ := d.coldDb.NewIter(&pebble.IterOptions{
 		LowerBound: append(prefixCold, start...),
 		UpperBound: upperBound(prefixCold),
 	})
-	iterHot.First()
+	iterHotSSD.First()
+	iterHotHDD.First()
 	iterCold.First()
 	return &pebbleIterator{
-		iterHot:      iterHot,
-		iterCold:     iterCold,
-		moved:        true,
-		released:     false,
-		movedHot:     true,
-		movedCold:    true,
-		releasedHot:  false,
-		releasedCold: false,
-		validCold:    true,
-		validHot:     true,
-		turnHot:      true, // current turn
+		iterHotSSD:     iterHotSSD,
+		iterHotHDD:     iterHotHDD,
+		iterCold:       iterCold,
+		moved:          true,
+		released:       false,
+		movedHotSSD:    true,
+		movedHotHDD:    true,
+		movedCold:      true,
+		releasedHotSSD: false,
+		releasedHotHDD: false,
+		releasedCold:   false,
+		validHotSSD:    true,
+		validHotHDD:    true,
+		validCold:      true,
+		turn:           0,
 	}
 }
 
 // Next moves the iterator to the next key/value pair. It returns whether the
 // iterator is exhausted.
 func (iter *pebbleIterator) Next() bool {
-	if iter.movedHot && iter.movedCold {
-		iter.movedHot = false
+	if iter.movedHotSSD && iter.movedHotHDD && iter.movedCold {
+		iter.movedHotSSD = false
+		iter.movedHotHDD = false
 		iter.movedCold = false
-		iter.validHot = iter.iterHot.Valid()
+		iter.validHotSSD = iter.iterHotSSD.Valid()
+		iter.validHotHDD = iter.iterHotHDD.Valid()
 		iter.validCold = iter.iterCold.Valid()
-		if iter.validHot && iter.validCold {
-			result := bytes.Compare(iter.KeyHot(), iter.KeyCold())
-			if result > 0 {
-				iter.turnHot = false
-			} else if result < 0 {
-				iter.turnHot = true
+		if iter.validHotSSD && iter.validHotHDD {
+			result := bytes.Compare(iter.KeyHotSSD(), iter.KeyHotHDD())
+			if result < 0 {
+				iter.turn = 0
+			} else if result > 0 {
+				iter.turn = 1
 			} else {
-				iter.turnHot = true
+				iter.turn = 0
+				iter.validHotHDD = iter.iterHotHDD.Next()
+			}
+		} else if iter.validHotSSD && iter.validCold {
+			result := bytes.Compare(iter.KeyHotSSD(), iter.KeyCold())
+			if result < 0 {
+				iter.turn = 0
+			} else if result > 0 {
+				iter.turn = 2
+			} else {
+				iter.turn = 0
 				iter.validCold = iter.iterCold.Next()
 			}
-		} else if iter.validHot {
-			iter.turnHot = true
+		} else if iter.validHotHDD && iter.validCold {
+			result := bytes.Compare(iter.KeyHotHDD(), iter.KeyCold())
+			if result < 0 {
+				iter.turn = 1
+			} else if result > 0 {
+				iter.turn = 2
+			} else {
+				iter.turn = 1
+				iter.validCold = iter.iterCold.Next()
+			}
+		} else if iter.validHotSSD {
+			iter.turn = 0
+		} else if iter.validHotHDD {
+			iter.turn = 1
 		} else if iter.validCold {
-			iter.turnHot = false
+			iter.turn = 2
 		}
-		return iter.validHot || iter.validCold
+		return iter.validHotSSD || iter.validHotHDD || iter.validCold
 	}
 
-	if iter.turnHot {
-		iter.validHot = iter.iterHot.Next()
-	} else {
+	if iter.turn == 0 {
+		iter.validHotSSD = iter.iterHotSSD.Next()
+	} else if iter.turn == 1 {
+		iter.validHotHDD = iter.iterHotHDD.Next()
+	} else if iter.turn == 2 {
 		iter.validCold = iter.iterCold.Next()
 	}
 
-	if iter.validHot && iter.validCold {
-		result := bytes.Compare(iter.KeyHot(), iter.KeyCold())
-		if result > 0 {
-			iter.turnHot = false
-		} else if result < 0 {
-			iter.turnHot = true
+	if iter.validHotSSD && iter.validHotHDD {
+		result := bytes.Compare(iter.KeyHotSSD(), iter.KeyHotHDD())
+		if result < 0 {
+			iter.turn = 0
+		} else if result > 0 {
+			iter.turn = 1
 		} else {
-			if iter.turnHot {
-				iter.validCold = iter.iterCold.Next()
+			if iter.turn == 0 {
+				iter.validHotHDD = iter.iterHotHDD.Next()
 			} else {
-				iter.validHot = iter.iterHot.Next()
+				iter.validHotSSD = iter.iterHotSSD.Next()
 			}
-			if iter.validHot {
-				iter.turnHot = true
+			if iter.validHotSSD {
+				iter.turn = 0
 			} else {
-				iter.turnHot = false
+				iter.turn = 1
 			}
 		}
-	} else if iter.validHot {
-		iter.turnHot = true
+	} else if iter.validHotSSD && iter.validCold {
+		result := bytes.Compare(iter.KeyHotSSD(), iter.KeyCold())
+		if result < 0 {
+			iter.turn = 0
+		} else if result > 0 {
+			iter.turn = 2
+		} else {
+			if iter.turn == 0 {
+				iter.validCold = iter.iterCold.Next()
+			} else {
+				iter.validHotSSD = iter.iterHotSSD.Next()
+			}
+			if iter.validHotSSD {
+				iter.turn = 0
+			} else {
+				iter.turn = 2
+			}
+		}
+	} else if iter.validHotHDD && iter.validCold {
+		result := bytes.Compare(iter.KeyHotHDD(), iter.KeyCold())
+		if result < 0 {
+			iter.turn = 1
+		} else if result > 0 {
+			iter.turn = 2
+		} else {
+			if iter.turn == 1 {
+				iter.validCold = iter.iterCold.Next()
+			} else {
+				iter.validHotHDD = iter.iterHotHDD.Next()
+			}
+			if iter.validHotHDD {
+				iter.turn = 1
+			} else {
+				iter.turn = 2
+			}
+		}
+	} else if iter.validHotSSD {
+		iter.turn = 0
+	} else if iter.validHotHDD {
+		iter.turn = 1
 	} else if iter.validCold {
-		iter.turnHot = false
+		iter.turn = 2
 	}
 
-	return iter.validHot || iter.validCold
+	return iter.validHotSSD || iter.validHotHDD || iter.validCold
 }
 
-func (iter *pebbleIterator) KeyHot() []byte {
-	if iter.validHot {
-		return iter.iterHot.Key()[1:]
+func (iter *pebbleIterator) KeyHotSSD() []byte {
+	if iter.validHotSSD {
+		return iter.iterHotSSD.Key()[1:]
+	}
+	return nil
+}
+
+func (iter *pebbleIterator) KeyHotHDD() []byte {
+	if iter.validHotHDD {
+		return iter.iterHotHDD.Key()[1:]
 	}
 	return nil
 }
@@ -928,7 +1137,7 @@ func (iter *pebbleIterator) KeyCold() []byte {
 // Error returns any accumulated error. Exhausting all the key/value pairs
 // is not considered to be an error.
 func (iter *pebbleIterator) Error() error {
-	if err := iter.iterHot.Error(); err != nil {
+	if err := iter.iterHotSSD.Error(); err != nil {
 		return err
 	}
 	return iter.iterCold.Error()
@@ -939,10 +1148,18 @@ func (iter *pebbleIterator) Error() error {
 // change on the next call to Next.
 func (iter *pebbleIterator) Key() []byte {
 	// fmt.Printf("ik: %X\n", base64.StdEncoding.EncodeToString(iter.iter.Key()))
-	if iter.turnHot {
-		return iter.iterHot.Key()[1:]
+	if iter.turn == 0 {
+		key := iter.iterHotSSD.Key()
+		// fmt.Printf("ik0: %d\n", key[0])
+		return key[1:]
+	} else if iter.turn == 1 {
+		key := iter.iterHotHDD.Key()
+		// fmt.Printf("ik1: %d\n", key[0])
+		return key[1:]
 	} else {
-		return iter.iterCold.Key()[1:]
+		key := iter.iterCold.Key()
+		// fmt.Printf("ik2: %d\n", key[0])
+		return key[1:]
 	}
 }
 
@@ -950,20 +1167,48 @@ func (iter *pebbleIterator) Key() []byte {
 // caller should not modify the contents of the returned slice, and its contents
 // may change on the next call to Next.
 func (iter *pebbleIterator) Value() []byte {
-	if iter.turnHot {
-		val := iter.iterHot.Value()
+	if iter.turn == 0 {
+		val := iter.iterHotSSD.Value()
+		return val
+	} else if iter.turn == 1 {
+		val := iter.iterHotHDD.Value()
 		return val
 	} else {
 		return iter.iterCold.Value()
 	}
 }
 
+func (iter *pebbleIterator) ValueHotSSD() []byte {
+	if iter.validHotSSD {
+		return iter.iterHotSSD.Value()
+	}
+	return nil
+}
+
+func (iter *pebbleIterator) ReleaseHotSSD() {
+	if !iter.releasedHotSSD {
+		iter.iterHotSSD.Close()
+		iter.releasedHotSSD = true
+	}
+}
+
+func (iter *pebbleIterator) ReleaseHotHDD() {
+	if !iter.releasedHotSSD {
+		iter.iterHotHDD.Close()
+		iter.releasedHotSSD = true
+	}
+}
+
 // Release releases associated resources. Release should always succeed and can
 // be called multiple times without causing error.
 func (iter *pebbleIterator) Release() {
-	if !iter.releasedHot {
-		iter.iterHot.Close()
-		iter.releasedHot = true
+	if !iter.releasedHotSSD {
+		iter.iterHotSSD.Close()
+		iter.releasedHotSSD = true
+	}
+	if !iter.releasedHotHDD {
+		iter.iterHotHDD.Close()
+		iter.releasedHotHDD = true
 	}
 	if !iter.releasedCold {
 		iter.iterCold.Close()
