@@ -40,7 +40,7 @@ func ReadCanonicalHash(db ethdb.Reader, number uint64) common.Hash {
 		data, _ = reader.Ancient(ChainFreezerHashTable, number)
 		if len(data) == 0 {
 			// Get it by hash from leveldb
-			data, _ = db.Get(headerHashKey(number))
+			data, _ = db.Get(1, headerHashKey(number))
 		}
 		return nil
 	})
@@ -144,7 +144,7 @@ func ReadAllCanonicalHashes(db ethdb.Iteratee, from uint64, to uint64, limit int
 
 // ReadHeaderNumber returns the header number assigned to a hash.
 func ReadHeaderNumber(db ethdb.KeyValueReader, hash common.Hash) *uint64 {
-	data, _ := db.Get(headerNumberKey(hash))
+	data, _ := db.Get(2, headerNumberKey(hash))
 	if len(data) != 8 {
 		return nil
 	}
@@ -170,7 +170,7 @@ func DeleteHeaderNumber(db ethdb.KeyValueWriter, hash common.Hash) {
 
 // ReadHeadHeaderHash retrieves the hash of the current canonical head header.
 func ReadHeadHeaderHash(db ethdb.KeyValueReader) common.Hash {
-	data, _ := db.Get(headHeaderKey)
+	data, _ := db.Get(3, headHeaderKey)
 	if len(data) == 0 {
 		return common.Hash{}
 	}
@@ -186,7 +186,7 @@ func WriteHeadHeaderHash(db ethdb.KeyValueWriter, hash common.Hash) {
 
 // ReadHeadBlockHash retrieves the hash of the current canonical head block.
 func ReadHeadBlockHash(db ethdb.KeyValueReader) common.Hash {
-	data, _ := db.Get(headBlockKey)
+	data, _ := db.Get(6, headBlockKey)
 	if len(data) == 0 {
 		return common.Hash{}
 	}
@@ -202,7 +202,7 @@ func WriteHeadBlockHash(db ethdb.KeyValueWriter, hash common.Hash) {
 
 // ReadHeadFastBlockHash retrieves the hash of the current fast-sync head block.
 func ReadHeadFastBlockHash(db ethdb.KeyValueReader) common.Hash {
-	data, _ := db.Get(headFastBlockKey)
+	data, _ := db.Get(4, headFastBlockKey)
 	if len(data) == 0 {
 		return common.Hash{}
 	}
@@ -218,7 +218,7 @@ func WriteHeadFastBlockHash(db ethdb.KeyValueWriter, hash common.Hash) {
 
 // ReadFinalizedBlockHash retrieves the hash of the finalized block.
 func ReadFinalizedBlockHash(db ethdb.KeyValueReader) common.Hash {
-	data, _ := db.Get(headFinalizedBlockKey)
+	data, _ := db.Get(5, headFinalizedBlockKey)
 	if len(data) == 0 {
 		return common.Hash{}
 	}
@@ -235,7 +235,7 @@ func WriteFinalizedBlockHash(db ethdb.KeyValueWriter, hash common.Hash) {
 // ReadLastPivotNumber retrieves the number of the last pivot block. If the node
 // full synced, the last pivot will always be nil.
 func ReadLastPivotNumber(db ethdb.KeyValueReader) *uint64 {
-	data, _ := db.Get(lastPivotKey)
+	data, _ := db.Get(7, lastPivotKey)
 	if len(data) == 0 {
 		return nil
 	}
@@ -261,7 +261,7 @@ func WriteLastPivotNumber(db ethdb.KeyValueWriter, pivot uint64) {
 // ReadTxIndexTail retrieves the number of oldest indexed block
 // whose transaction indices has been indexed.
 func ReadTxIndexTail(db ethdb.KeyValueReader) *uint64 {
-	data, _ := db.Get(txIndexTailKey)
+	data, _ := db.Get(18, txIndexTailKey)
 	if len(data) != 8 {
 		return nil
 	}
@@ -302,7 +302,7 @@ func ReadHeaderRange(db ethdb.Reader, number uint64, count uint64) []rlp.RawValu
 		// If we need to read live blocks, we need to figure out the hash first
 		hash := ReadCanonicalHash(db, number)
 		for ; i >= limit && count > 0; i-- {
-			if data, _ := db.Get(headerKey(i, hash)); len(data) > 0 {
+			if data, _ := db.Get(8, headerKey(i, hash)); len(data) > 0 {
 				rlpHeaders = append(rlpHeaders, data)
 				// Get the parent hash for next query
 				hash = types.HeaderParentHashFromRLP(data)
@@ -344,7 +344,7 @@ func ReadHeaderRLP(db ethdb.Reader, hash common.Hash, number uint64) rlp.RawValu
 			return nil
 		}
 		// If not, try reading from leveldb
-		data, _ = db.Get(headerKey(number, hash))
+		data, _ = db.Get(9, headerKey(number, hash))
 		return nil
 	})
 	return data
@@ -355,7 +355,7 @@ func HasHeader(db ethdb.Reader, hash common.Hash, number uint64) bool {
 	if isCanon(db, number, hash) {
 		return true
 	}
-	if has, err := db.Has(headerKey(number, hash)); !has || err != nil {
+	if has, err := db.Has(1, headerKey(number, hash)); !has || err != nil {
 		return false
 	}
 	return true
@@ -435,7 +435,7 @@ func ReadBodyRLP(db ethdb.Reader, hash common.Hash, number uint64) rlp.RawValue 
 			return nil
 		}
 		// If not, try reading from leveldb
-		data, _ = db.Get(blockBodyKey(number, hash))
+		data, _ = db.Get(10, blockBodyKey(number, hash))
 		return nil
 	})
 	return data
@@ -453,8 +453,8 @@ func ReadCanonicalBodyRLP(db ethdb.Reader, number uint64) rlp.RawValue {
 		// Block is not in ancients, read from leveldb by hash and number.
 		// Note: ReadCanonicalHash cannot be used here because it also
 		// calls ReadAncients internally.
-		hash, _ := db.Get(headerHashKey(number))
-		data, _ = db.Get(blockBodyKey(number, common.BytesToHash(hash)))
+		hash, _ := db.Get(11, headerHashKey(number))
+		data, _ = db.Get(12, blockBodyKey(number, common.BytesToHash(hash)))
 		return nil
 	})
 	return data
@@ -472,7 +472,7 @@ func HasBody(db ethdb.Reader, hash common.Hash, number uint64) bool {
 	if isCanon(db, number, hash) {
 		return true
 	}
-	if has, err := db.Has(blockBodyKey(number, hash)); !has || err != nil {
+	if has, err := db.Has(2, blockBodyKey(number, hash)); !has || err != nil {
 		return false
 	}
 	return true
@@ -518,7 +518,7 @@ func ReadTdRLP(db ethdb.Reader, hash common.Hash, number uint64) rlp.RawValue {
 			return nil
 		}
 		// If not, try reading from leveldb
-		data, _ = db.Get(headerTDKey(number, hash))
+		data, _ = db.Get(13, headerTDKey(number, hash))
 		return nil
 	})
 	return data
@@ -562,7 +562,7 @@ func HasReceipts(db ethdb.Reader, hash common.Hash, number uint64) bool {
 	if isCanon(db, number, hash) {
 		return true
 	}
-	if has, err := db.Has(blockReceiptsKey(number, hash)); !has || err != nil {
+	if has, err := db.Has(3, blockReceiptsKey(number, hash)); !has || err != nil {
 		return false
 	}
 	return true
@@ -578,7 +578,7 @@ func ReadReceiptsRLP(db ethdb.Reader, hash common.Hash, number uint64) rlp.RawVa
 			return nil
 		}
 		// If not, try reading from leveldb
-		data, _ = db.Get(blockReceiptsKey(number, hash))
+		data, _ = db.Get(14, blockReceiptsKey(number, hash))
 		return nil
 	})
 	return data
@@ -811,7 +811,7 @@ type badBlock struct {
 
 // ReadBadBlock retrieves the bad block with the corresponding block hash.
 func ReadBadBlock(db ethdb.Reader, hash common.Hash) *types.Block {
-	blob, err := db.Get(badBlockKey)
+	blob, err := db.Get(15, badBlockKey)
 	if err != nil {
 		return nil
 	}
@@ -834,7 +834,7 @@ func ReadBadBlock(db ethdb.Reader, hash common.Hash) *types.Block {
 // ReadAllBadBlocks retrieves all the bad blocks in the database.
 // All returned blocks are sorted in reverse order by number.
 func ReadAllBadBlocks(db ethdb.Reader) []*types.Block {
-	blob, err := db.Get(badBlockKey)
+	blob, err := db.Get(16, badBlockKey)
 	if err != nil {
 		return nil
 	}
@@ -856,7 +856,7 @@ func ReadAllBadBlocks(db ethdb.Reader) []*types.Block {
 // WriteBadBlock serializes the bad block into the database. If the cumulated
 // bad blocks exceeds the limitation, the oldest will be dropped.
 func WriteBadBlock(db ethdb.KeyValueStore, block *types.Block) {
-	blob, err := db.Get(badBlockKey)
+	blob, err := db.Get(17, badBlockKey)
 	if err != nil {
 		log.Warn("Failed to load old bad blocks", "error", err)
 	}

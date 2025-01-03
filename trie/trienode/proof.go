@@ -70,7 +70,7 @@ func (db *ProofSet) Delete(idx int, key []byte) error {
 }
 
 // Get returns a stored node
-func (db *ProofSet) Get(key []byte) ([]byte, error) {
+func (db *ProofSet) Get(idx int, key []byte) ([]byte, error) {
 	db.lock.RLock()
 	defer db.lock.RUnlock()
 
@@ -81,8 +81,8 @@ func (db *ProofSet) Get(key []byte) ([]byte, error) {
 }
 
 // Has returns true if the node set contains the given key
-func (db *ProofSet) Has(key []byte) (bool, error) {
-	_, err := db.Get(key)
+func (db *ProofSet) Has(idx int, key []byte) (bool, error) {
+	_, err := db.Get(idx, key)
 	return err == nil, nil
 }
 

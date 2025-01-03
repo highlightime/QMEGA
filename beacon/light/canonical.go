@@ -111,7 +111,7 @@ func (cs *canonicalStore[T]) get(backend ethdb.KeyValueReader, period uint64) (T
 	if value, ok := cs.cache.Get(period); ok {
 		return value, true
 	}
-	enc, err := backend.Get(cs.databaseKey(period))
+	enc, err := backend.Get(56, cs.databaseKey(period))
 	if err != nil {
 		log.Error("Canonical store value not found", "period", period, "start", cs.periods.Start, "end", cs.periods.End)
 		return null, false

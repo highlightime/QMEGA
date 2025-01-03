@@ -470,7 +470,7 @@ func (c *ChainIndexer) Prune(threshold uint64) error {
 // loadValidSections reads the number of valid sections from the index database
 // and caches is into the local state.
 func (c *ChainIndexer) loadValidSections() {
-	data, _ := c.indexDb.Get([]byte("count"))
+	data, _ := c.indexDb.Get(54, []byte("count"))
 	if len(data) == 8 {
 		c.storedSections = binary.BigEndian.Uint64(data)
 	}
@@ -497,7 +497,7 @@ func (c *ChainIndexer) SectionHead(section uint64) common.Hash {
 	var data [8]byte
 	binary.BigEndian.PutUint64(data[:], section)
 
-	hash, _ := c.indexDb.Get(append([]byte("shead"), data[:]...))
+	hash, _ := c.indexDb.Get(55, append([]byte("shead"), data[:]...))
 	if len(hash) == len(common.Hash{}) {
 		return common.BytesToHash(hash)
 	}

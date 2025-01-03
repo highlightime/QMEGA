@@ -31,7 +31,7 @@ import (
 func ReadDatabaseVersion(db ethdb.KeyValueReader) *uint64 {
 	var version uint64
 
-	enc, _ := db.Get(databaseVersionKey)
+	enc, _ := db.Get(21, databaseVersionKey)
 	if len(enc) == 0 {
 		return nil
 	}
@@ -55,7 +55,7 @@ func WriteDatabaseVersion(db ethdb.KeyValueWriter, version uint64) {
 
 // ReadChainConfig retrieves the consensus settings based on the given genesis hash.
 func ReadChainConfig(db ethdb.KeyValueReader, hash common.Hash) *params.ChainConfig {
-	data, _ := db.Get(configKey(hash))
+	data, _ := db.Get(22, configKey(hash))
 	if len(data) == 0 {
 		return nil
 	}
@@ -84,7 +84,7 @@ func WriteChainConfig(db ethdb.KeyValueWriter, hash common.Hash, cfg *params.Cha
 // ReadGenesisStateSpec retrieves the genesis state specification based on the
 // given genesis (block-)hash.
 func ReadGenesisStateSpec(db ethdb.KeyValueReader, blockhash common.Hash) []byte {
-	data, _ := db.Get(genesisStateSpecKey(blockhash))
+	data, _ := db.Get(23, genesisStateSpecKey(blockhash))
 	return data
 }
 
@@ -111,7 +111,7 @@ const crashesToKeep = 10
 func PushUncleanShutdownMarker(db ethdb.KeyValueStore) ([]uint64, uint64, error) {
 	var uncleanShutdowns crashList
 	// Read old data
-	if data, err := db.Get(uncleanShutdownKey); err == nil {
+	if data, err := db.Get(24, uncleanShutdownKey); err == nil {
 		if err := rlp.DecodeBytes(data, &uncleanShutdowns); err != nil {
 			return nil, 0, err
 		}
@@ -139,7 +139,7 @@ func PushUncleanShutdownMarker(db ethdb.KeyValueStore) ([]uint64, uint64, error)
 func PopUncleanShutdownMarker(db ethdb.KeyValueStore) {
 	var uncleanShutdowns crashList
 	// Read old data
-	if data, err := db.Get(uncleanShutdownKey); err != nil {
+	if data, err := db.Get(25, uncleanShutdownKey); err != nil {
 		log.Warn("Error reading unclean shutdown markers", "error", err)
 	} else if err := rlp.DecodeBytes(data, &uncleanShutdowns); err != nil {
 		log.Error("Error decoding unclean shutdown markers", "error", err) // Should mos def _not_ happen
@@ -157,7 +157,7 @@ func PopUncleanShutdownMarker(db ethdb.KeyValueStore) {
 func UpdateUncleanShutdownMarker(db ethdb.KeyValueStore) {
 	var uncleanShutdowns crashList
 	// Read old data
-	if data, err := db.Get(uncleanShutdownKey); err != nil {
+	if data, err := db.Get(26, uncleanShutdownKey); err != nil {
 		log.Warn("Error reading unclean shutdown markers", "error", err)
 	} else if err := rlp.DecodeBytes(data, &uncleanShutdowns); err != nil {
 		log.Warn("Error decoding unclean shutdown markers", "error", err)
@@ -177,7 +177,7 @@ func UpdateUncleanShutdownMarker(db ethdb.KeyValueStore) {
 
 // ReadTransitionStatus retrieves the eth2 transition status from the database
 func ReadTransitionStatus(db ethdb.KeyValueReader) []byte {
-	data, _ := db.Get(transitionStatusKey)
+	data, _ := db.Get(27, transitionStatusKey)
 	return data
 }
 

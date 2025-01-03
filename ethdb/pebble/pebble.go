@@ -83,10 +83,12 @@ type Database struct {
 
 	levelsGauge []metrics.Gauge // Gauge for tracking the number of tables in levels
 
-	quitLock     sync.RWMutex // Mutex protecting the quit channel and the closed flag
-	quitColdLock sync.RWMutex
-	quitChan     chan chan error // Quit channel to stop the metrics collection before closing the database
-	closed       bool            // keep track of whether we're Closed
+	quitLock      sync.RWMutex // Mutex protecting the quit channel and the closed flag
+	quitColdLock  sync.RWMutex
+	quitChan      chan chan error // Quit channel to stop the metrics collection before closing the database
+	closed        bool            // keep track of whether we're Closed
+	migrationChan chan [2][]byte
+	kvCnt         atomic.Int64
 
 	log log.Logger // Contextual logger tracking the database path
 
@@ -101,7 +103,8 @@ type Database struct {
 	writeDelayCount     atomic.Int64 // Total number of write stall counts
 	writeDelayTime      atomic.Int64 // Total time spent in write stalls
 
-	writeOptions *pebble.WriteOptions
+	writeOptionsHot  *pebble.WriteOptions
+	writeOptionsCold *pebble.WriteOptions
 }
 
 func (d *Database) onCompactionBegin(info pebble.CompactionInfo) {
@@ -192,11 +195,14 @@ func New(file1, file2 string, cache int, handles int, namespace string, readonly
 		memTableSize = maxMemTableSize - 1
 	}
 	db := &Database{
-		hotFn:        file1,
-		coldFn:       file2,
-		log:          logger,
-		quitChan:     make(chan chan error),
-		writeOptions: &pebble.WriteOptions{Sync: !ephemeral},
+		hotFn:    file1,
+		coldFn:   file2,
+		log:      logger,
+		quitChan: make(chan chan error),
+		// queue:    NewQueue(),
+		migrationChan:    make(chan [2][]byte, 100000000),
+		writeOptionsHot:  &pebble.WriteOptions{Sync: !ephemeral},
+		writeOptionsCold: &pebble.WriteOptions{Sync: false},
 	}
 	opt := &pebble.Options{
 		// Pebble has a single combined cache area and the write
@@ -249,8 +255,10 @@ func New(file1, file2 string, cache int, handles int, namespace string, readonly
 	if err != nil {
 		return nil, err
 	}
+	opt2 := opt
+	// opt2.DisableWAL = true
 	db.hotDb = innerDB1
-	innerDB2, err := pebble.Open(file2, opt)
+	innerDB2, err := pebble.Open(file2, opt2)
 	if err != nil {
 		return nil, err
 	}
@@ -276,83 +284,50 @@ func New(file1, file2 string, cache int, handles int, namespace string, readonly
 	return db, nil
 }
 
-const TIME_INTERVAL = 1
-
-func (d *Database) BackgroundMigration() {
-	var errc chan error
-	ticker := time.NewTicker(TIME_INTERVAL * time.Second)
-	defer ticker.Stop()
-
-	go func() {
-		for i := 1; errc == nil; i++ {
-			select {
-			case <-ticker.C:
-				if err := d.backgroundMigration(); err != nil {
-					d.log.Error("Background Migration Failed", "err", err)
-				} else {
-					fmt.Println("Background Migration Success")
-				}
-			case errc = <-d.quitChan:
-			}
-		}
-	}()
-
-	select {}
-}
-
-func (d *Database) backgroundMigration() error {
-	iter := d.NewIteratorForMigration(prefixHDD, nil).(*pebbleIterator)
-	defer iter.ReleaseHotHDD()
+func (d *Database) BackgroundMigration() error {
 	batchHot := d.hotDb.NewBatch()
 	defer batchHot.Close()
+
 	batchCold := &batch{
 		bHot:  d.hotDb.NewBatch(),
 		bCold: d.coldDb.NewBatch(),
 		db:    d,
 	}
-	i := 0
-	for iter.NextHot() {
-		key := iter.Key()
-		value := iter.Value()
-		keyPrefixHDD := append(prefixHDD, key...)
-		batchCold.PutCold(keyPrefixHDD, value)
-		if err := batchHot.Delete(keyPrefixHDD, d.writeOptions); err != nil {
-			return err
+	defer batchCold.bHot.Close()
+	defer batchCold.bCold.Close()
+
+	for {
+		select {
+		case item, ok := <-d.migrationChan:
+			if !ok {
+				fmt.Println("Migration channel closed")
+				return nil
+			}
+			key, value := item[0], item[1]
+			batchCold.Put(0, key, value)
+			batchHot.Delete(key, d.writeOptionsHot)
+			d.kvCnt.Add(1)
+			if d.kvCnt.Load() >= 1500 {
+				// start := time.Now()
+				if err := batchCold.CommitCold(); err != nil {
+					return fmt.Errorf("failed to commit cold batch: %w", err)
+				}
+				if err := batchHot.Commit(d.writeOptionsHot); err != nil {
+					return fmt.Errorf("failed to commit hot batch: %w", err)
+				}
+				// end := time.Now()
+				// fmt.Println("cp: ", end.Sub(start))
+				// fmt.Println("cl: ", len(d.migrationChan))
+				batchCold = &batch{
+					bHot:  d.hotDb.NewBatch(),
+					bCold: d.coldDb.NewBatch(),
+					db:    d,
+				}
+				batchHot = d.hotDb.NewBatch()
+
+				d.kvCnt.Store(0)
+			}
 		}
-		i++
-		if i >= 1000000 {
-			break
-		}
-	}
-	if err := batchCold.CommitCold(); err != nil {
-		return err
-	}
-	if err := batchHot.Commit(d.writeOptions); err != nil {
-		return err
-	}
-	fmt.Println("Eviction Iteration :", i)
-	return nil
-}
-func (d *Database) NewIteratorForMigration(prefix []byte, start []byte) ethdb.Iterator {
-	iterHotHDD, _ := d.hotDb.NewIter(&pebble.IterOptions{
-		LowerBound: append(prefix, start...),
-		UpperBound: upperBound(prefix),
-	})
-	iterHotHDD.First()
-	return &pebbleIterator{
-		iterHotHDD:     iterHotHDD,
-		moved:          true,
-		released:       false,
-		movedHotSSD:    true,
-		movedHotHDD:    true,
-		movedCold:      true,
-		releasedHotSSD: false,
-		releasedHotHDD: false,
-		releasedCold:   false,
-		validHotSSD:    false,
-		validHotHDD:    true,
-		validCold:      false,
-		turn:           1,
 	}
 }
 
@@ -376,7 +351,7 @@ func (b *batch) CommitCold() error {
 	if b.db.closed {
 		return pebble.ErrClosed
 	}
-	if err := b.bCold.Commit(b.db.writeOptions); err != nil {
+	if err := b.bCold.Commit(b.db.writeOptionsCold); err != nil {
 		fmt.Println("dbCold Batch Write Error:", err)
 		return err
 	}
@@ -414,61 +389,71 @@ func (d *Database) Close() error {
 }
 
 // Has retrieves if a key is present in the key-value store.
-func (d *Database) Has(key []byte) (bool, error) {
+func (d *Database) Has(idx int, key []byte) (bool, error) {
 	d.quitLock.RLock()
 	defer d.quitLock.RUnlock()
 	if d.closed {
 		return false, pebble.ErrClosed
 	}
+	// where:= 1
 	keyPrefixSSD := append(prefixSSD, key...)
 	keyPrefixHDD := append(prefixHDD, key...)
 	_, closer, err := d.hotDb.Get(keyPrefixSSD)
 	if err != nil {
+		// where= 2
 		_, closer, err = d.hotDb.Get(keyPrefixHDD)
 		// check cold db if key is not found in hot db
 		if err == pebble.ErrNotFound {
+			// where= 3
 			_, err = d.GetCold(keyPrefixHDD)
 			if err == pebble.ErrNotFound {
 				return false, nil
 			} else if err != nil {
 				return false, err
 			}
+			// fmt.Printf("h: %d i: %d\n", where, idx)
 			return true, nil
 		} else if err != nil {
 			return false, err
 		}
 	}
 	defer closer.Close()
+	// fmt.Printf("h: %d i: %d\n", where, idx)
 	return true, nil
 }
 
 // Get retrieves the given key if it's present in the key-value store.
-func (d *Database) Get(key []byte) ([]byte, error) {
+func (d *Database) Get(idx int, key []byte) ([]byte, error) {
 	d.quitLock.RLock()
 	defer d.quitLock.RUnlock()
 	if d.closed {
 		return nil, pebble.ErrClosed
 	}
+	// where := 1
 	keyPrefixSSD := append(prefixSSD, key...)
 	keyPrefixHDD := append(prefixHDD, key...)
 	dat, closer, err := d.hotDb.Get(keyPrefixSSD)
 	if err != nil {
+		// where = 2
 		dat, closer, err = d.hotDb.Get(keyPrefixHDD)
-		// fmt.Printf("ghk: %d\n", keyPrefixHDD[0])
 		// check cold db if key is not found in hot db
 		if err != nil {
+			// where = 3
 			dat, err := d.GetCold(keyPrefixHDD)
 			if err != nil {
 				return nil, err
 			}
 			ret := make([]byte, len(dat))
 			copy(ret, dat)
+			// fmt.Printf("g: %d i: %d\n", where, idx)
 			return ret, nil
 		}
 	}
+
 	ret := make([]byte, len(dat))
 	copy(ret, dat)
 	closer.Close()
+	// fmt.Printf("g: %d i: %d\n", where, idx)
 	return ret, nil
 }
 
@@ -547,16 +532,22 @@ func (d *Database) NewSnapshot() (ethdb.Snapshot, error) {
 }
 
 // Has checks if the given key is present in either the hot or cold snapshot.
-func (snap *snapshot) Has(key []byte) (bool, error) {
+func (snap *snapshot) Has(idx int, key []byte) (bool, error) {
+	// where:= 1
 	keyPrefixSSD := append(prefixSSD, key...)
 	if has, err := snap.hasInSnapshot(snap.dbHot, keyPrefixSSD); err != nil || has {
+		// fmt.Printf("hs: %d i: %d\n", where, idx)
 		return has, err
 	}
 
+	// where= 2
 	keyPrefixHDD := append(prefixHDD, key...)
 	if has, err := snap.hasInSnapshot(snap.dbHot, keyPrefixHDD); err != nil || has {
+		// fmt.Printf("hs: %d i: %d\n", where, idx)
 		return has, err
 	}
+	// where= 3
+	// fmt.Printf("hs: %d i: %d\n", where, idx)
 	return snap.hasInSnapshot(snap.dbCold, keyPrefixHDD)
 }
 
@@ -573,9 +564,11 @@ func (snap *snapshot) hasInSnapshot(snapDb *pebble.Snapshot, key []byte) (bool, 
 }
 
 // Get retrieves the given key if it's present in either the hot or cold snapshot.
-func (snap *snapshot) Get(key []byte) ([]byte, error) {
+func (snap *snapshot) Get(idx int, key []byte) ([]byte, error) {
+	// where:= 1
 	keyPrefixSSD := append(prefixSSD, key...)
 	if data, err := snap.getFromSnapshot(snap.dbHot, keyPrefixSSD); err == nil {
+		// fmt.Printf("gs: %d i: %d\n", where, idx)
 		return data, nil
 	} else if err != pebble.ErrNotFound {
 		return nil, err
@@ -583,10 +576,14 @@ func (snap *snapshot) Get(key []byte) ([]byte, error) {
 
 	keyPrefixHDD := append(prefixHDD, key...)
 	if data, err := snap.getFromSnapshot(snap.dbHot, keyPrefixHDD); err == nil {
+		// where= 2
+		// fmt.Printf("gs: %d i: %d\n", where, idx)
 		return data, nil
 	} else if err != pebble.ErrNotFound {
 		return nil, err
 	}
+	// where= 3
+	// fmt.Printf("gs: %d i: %d\n", where, idx)
 	return snap.getFromSnapshot(snap.dbCold, keyPrefixHDD)
 }
 
@@ -667,10 +664,6 @@ func (d *Database) Compact(start []byte, limit []byte) error {
 
 	wg.Add(1)
 	go compactDb(d.hotDb)
-
-	wg.Add(1)
-	go compactDb(d.coldDb)
-
 	wg.Wait()
 
 	if err != nil {
@@ -799,6 +792,7 @@ func (d *Database) meter(refresh time.Duration, namespace string) {
 // 	key  string
 // 	size int
 // 	idx  int
+// 	flag bool
 // }
 
 // batch is a write-only batch that commits changes to its host database
@@ -813,6 +807,12 @@ type batch struct {
 	// keys []LOGGING
 	// putkeys []LOGGING
 	// delkeys []LOGGING
+	putkeys []ARYFORMIG
+}
+
+type ARYFORMIG struct {
+	key   []byte
+	value []byte
 }
 
 func isPutHDD(idx int) bool {
@@ -833,24 +833,44 @@ func isPutHDD(idx int) bool {
 
 // Put inserts the given value into the batch for later committing.
 func (b *batch) Put(idx int, key, value []byte) error {
-	if isPutHDD(idx) {
+	flag := isPutHDD(idx)
+	if flag {
 		key = append(prefixHDD, key...)
+		b.putkeys = append(b.putkeys, ARYFORMIG{key: key, value: value})
 	} else {
 		key = append(prefixSSD, key...)
 	}
 	// fmt.Printf("pk: %d\n", key[0])
 	b.bHot.Set(key, value, nil)
 	b.sizeHot += len(key) + len(value)
-	// b.putkeys = append(b.putkeys, LOGGING{key: base64.StdEncoding.EncodeToString(key), size: len(key) + len(value), idx: idx})
+	// b.putkeys = append(b.putkeys, LOGGING{key: base64.StdEncoding.EncodeToString(key), size: len(key) + len(value), flag: flag})
 
 	return nil
 }
 
+func isDelHDD(idx int) bool {
+	var trieIdx = []int{-471, -481, -491}
+	var snapshotIdx = []int{-291, -301, -311, -331, -341, -351}
+	for _, i := range trieIdx {
+		if i == idx {
+			return true
+		}
+	}
+	for _, i := range snapshotIdx {
+		if i == idx {
+			return true
+		}
+	}
+	return false
+}
+
 // Delete inserts the key removal into the batch for later committing.
 func (b *batch) Delete(idx int, key []byte) error {
-	keyCold := append(prefixHDD, key...)
-	b.bCold.Delete(keyCold, nil)
-	b.sizeCold += len(keyCold)
+	if isDelHDD(idx) {
+		keyCold := append(prefixHDD, key...)
+		b.bCold.Delete(keyCold, nil)
+		b.sizeCold += len(keyCold)
+	}
 
 	keyHot := append(prefixSSD, key...)
 	b.bHot.Delete(keyHot, nil)
@@ -872,14 +892,18 @@ func (b *batch) Write(idx int) error {
 		b.db.quitLock.RUnlock()
 		return pebble.ErrClosed
 	}
-	if err := b.bHot.Commit(b.db.writeOptions); err != nil {
+	if err := b.bHot.Commit(b.db.writeOptionsHot); err != nil {
 		fmt.Println("dbHot Batch Write Error:", err)
 		return err
 	}
 	b.db.quitLock.RUnlock()
+	for _, k := range b.putkeys {
+		b.db.migrationChan <- [2][]byte{k.key, k.value}
+		// b.db.queue.Enqueue([2][]byte{k.key, k.value})
+	}
 	b.db.quitColdLock.RLock()
 	defer b.db.quitColdLock.RUnlock()
-	if err := b.bCold.Commit(b.db.writeOptions); err != nil {
+	if err := b.bCold.Commit(b.db.writeOptionsCold); err != nil {
 		fmt.Println("dbCold Batch Write Error:", err)
 		return err
 	}

@@ -58,9 +58,8 @@ const (
 // functionality it also supports batch writes and iterating over the keyspace in
 // binary-alphabetical order.
 type Database struct {
-	fn string      // filename for reporting
-	db *leveldb.DB // LevelDB instance
-
+	fn                  string // filename for reporting
+	db                  *leveldb.DB
 	compTimeMeter       metrics.Meter // Meter for measuring the total time spent in database compaction
 	compReadMeter       metrics.Meter // Meter for measuring the data read during compaction
 	compWriteMeter      metrics.Meter // Meter for measuring the data written during compaction
@@ -183,12 +182,12 @@ func (db *Database) Close() error {
 }
 
 // Has retrieves if a key is present in the key-value store.
-func (db *Database) Has(key []byte) (bool, error) {
+func (db *Database) Has(idx int, key []byte) (bool, error) {
 	return db.db.Has(key, nil)
 }
 
 // Get retrieves the given key if it's present in the key-value store.
-func (db *Database) Get(key []byte) ([]byte, error) {
+func (db *Database) Get(idx int, key []byte) ([]byte, error) {
 	dat, err := db.db.Get(key, nil)
 	if err != nil {
 		return nil, err
@@ -506,13 +505,13 @@ type snapshot struct {
 
 // Has retrieves if a key is present in the snapshot backing by a key-value
 // data store.
-func (snap *snapshot) Has(key []byte) (bool, error) {
+func (snap *snapshot) Has(idx int, key []byte) (bool, error) {
 	return snap.db.Has(key, nil)
 }
 
 // Get retrieves the given key if it's present in the snapshot backing by
 // key-value data store.
-func (snap *snapshot) Get(key []byte) ([]byte, error) {
+func (snap *snapshot) Get(idx int, key []byte) ([]byte, error) {
 	return snap.db.Get(key, nil)
 }
 

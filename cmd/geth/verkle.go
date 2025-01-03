@@ -141,7 +141,7 @@ func verifyVerkle(ctx *cli.Context) error {
 		log.Info("Rebuilding the tree", "root", rootC, "number", headBlock.NumberU64())
 	}
 
-	serializedRoot, err := chaindb.Get(rootC[:])
+	serializedRoot, err := chaindb.Get(64, rootC[:])
 	if err != nil {
 		return err
 	}
@@ -150,13 +150,20 @@ func verifyVerkle(ctx *cli.Context) error {
 		return err
 	}
 
-	if err := checkChildren(root, chaindb.Get); err != nil {
+	if err := checkChildren(root, nodeResolverAdapter(chaindb.Get)); err != nil {
 		log.Error("Could not rebuild the tree from the database", "err", err)
 		return err
 	}
 
 	log.Info("Tree was rebuilt from the database")
 	return nil
+}
+
+func nodeResolverAdapter(getFunc func(idx int, key []byte) ([]byte, error)) verkle.NodeResolverFn {
+	return func(key []byte) ([]byte, error) {
+		const idx = 0
+		return getFunc(idx, key)
+	}
 }
 
 func expandVerkle(ctx *cli.Context) error {
@@ -191,7 +198,7 @@ func expandVerkle(ctx *cli.Context) error {
 		return fmt.Errorf("usage: %s root key1 [key 2...]", ctx.App.Name)
 	}
 
-	serializedRoot, err := chaindb.Get(rootC[:])
+	serializedRoot, err := chaindb.Get(70, rootC[:])
 	if err != nil {
 		return err
 	}
@@ -202,7 +209,7 @@ func expandVerkle(ctx *cli.Context) error {
 
 	for i, key := range keylist {
 		log.Info("Reading key", "index", i, "key", keylist[0])
-		root.Get(key, chaindb.Get)
+		root.Get(key, nodeResolverAdapter(chaindb.Get))
 	}
 
 	if err := os.WriteFile("dump.dot", []byte(verkle.ToDot(root)), 0600); err != nil {
