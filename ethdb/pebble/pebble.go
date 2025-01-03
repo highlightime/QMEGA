@@ -285,8 +285,12 @@ func New(file1, file2 string, cache int, handles int, namespace string, readonly
 }
 
 func (d *Database) BackgroundMigration() error {
-	batchHot := d.hotDb.NewBatch()
-	defer batchHot.Close()
+	syncInterval := 10 * time.Minute
+	ticker := time.NewTicker(syncInterval)
+	defer ticker.Stop()
+
+	// batchHot := d.hotDb.NewBatch()
+	// defer batchHot.Close()
 
 	batchCold := &batch{
 		bHot:  d.hotDb.NewBatch(),
@@ -298,6 +302,15 @@ func (d *Database) BackgroundMigration() error {
 
 	for {
 		select {
+		case <-ticker.C:
+			if err := d.coldDb.Flush(); err != nil {
+				return fmt.Errorf("failed to flush cold db: %w", err)
+			}
+			// fmt.Println("Flushed cold db")
+			// if err := batchHot.Commit(d.writeOptionsHot); err != nil {
+			// 	return fmt.Errorf("failed to commit hot batch: %w", err)
+			// }
+			// batchHot = d.hotDb.NewBatch()
 		case item, ok := <-d.migrationChan:
 			if !ok {
 				fmt.Println("Migration channel closed")
@@ -305,26 +318,17 @@ func (d *Database) BackgroundMigration() error {
 			}
 			key, value := item[0], item[1]
 			batchCold.Put(0, key, value)
-			batchHot.Delete(key, d.writeOptionsHot)
+			// batchHot.Delete(key, d.writeOptionsHot)
 			d.kvCnt.Add(1)
 			if d.kvCnt.Load() >= 1500 {
-				// start := time.Now()
 				if err := batchCold.CommitCold(); err != nil {
 					return fmt.Errorf("failed to commit cold batch: %w", err)
 				}
-				if err := batchHot.Commit(d.writeOptionsHot); err != nil {
-					return fmt.Errorf("failed to commit hot batch: %w", err)
-				}
-				// end := time.Now()
-				// fmt.Println("cp: ", end.Sub(start))
-				// fmt.Println("cl: ", len(d.migrationChan))
 				batchCold = &batch{
 					bHot:  d.hotDb.NewBatch(),
 					bCold: d.coldDb.NewBatch(),
 					db:    d,
 				}
-				batchHot = d.hotDb.NewBatch()
-
 				d.kvCnt.Store(0)
 			}
 		}
@@ -351,7 +355,7 @@ func (b *batch) CommitCold() error {
 	if b.db.closed {
 		return pebble.ErrClosed
 	}
-	if err := b.bCold.Commit(b.db.writeOptionsCold); err != nil {
+	if err := b.bCold.Commit(b.db.writeOptionsHot); err != nil {
 		fmt.Println("dbCold Batch Write Error:", err)
 		return err
 	}
@@ -903,7 +907,7 @@ func (b *batch) Write(idx int) error {
 	}
 	b.db.quitColdLock.RLock()
 	defer b.db.quitColdLock.RUnlock()
-	if err := b.bCold.Commit(b.db.writeOptionsCold); err != nil {
+	if err := b.bCold.Commit(b.db.writeOptionsHot); err != nil {
 		fmt.Println("dbCold Batch Write Error:", err)
 		return err
 	}
