@@ -83,10 +83,11 @@ type Database struct {
 
 	levelsGauge []metrics.Gauge // Gauge for tracking the number of tables in levels
 
-	quitLock     sync.RWMutex // Mutex protecting the quit channel and the closed flag
-	quitColdLock sync.RWMutex
-	quitChan     chan chan error // Quit channel to stop the metrics collection before closing the database
-	closed       bool            // keep track of whether we're Closed
+	quitLock      sync.RWMutex // Mutex protecting the quit channel and the closed flag
+	quitColdLock  sync.RWMutex
+	quitChan      chan chan error // Quit channel to stop the metrics collection before closing the database
+	closed        bool            // keep track of whether we're Closed
+	migrationChan chan [2][]byte
 
 	log log.Logger // Contextual logger tracking the database path
 
@@ -101,7 +102,8 @@ type Database struct {
 	writeDelayCount     atomic.Int64 // Total number of write stall counts
 	writeDelayTime      atomic.Int64 // Total time spent in write stalls
 
-	writeOptions *pebble.WriteOptions
+	writeOptionsHot  *pebble.WriteOptions
+	writeOptionsCold *pebble.WriteOptions
 }
 
 func (d *Database) onCompactionBegin(info pebble.CompactionInfo) {
@@ -192,11 +194,13 @@ func New(file1, file2 string, cache int, handles int, namespace string, readonly
 		memTableSize = maxMemTableSize - 1
 	}
 	db := &Database{
-		hotFn:        file1,
-		coldFn:       file2,
-		log:          logger,
-		quitChan:     make(chan chan error),
-		writeOptions: &pebble.WriteOptions{Sync: !ephemeral},
+		hotFn:            file1,
+		coldFn:           file2,
+		log:              logger,
+		quitChan:         make(chan chan error),
+		migrationChan:    make(chan [2][]byte, 100000000),
+		writeOptionsHot:  &pebble.WriteOptions{Sync: !ephemeral},
+		writeOptionsCold: &pebble.WriteOptions{Sync: false},
 	}
 	opt := &pebble.Options{
 		// Pebble has a single combined cache area and the write
@@ -278,61 +282,45 @@ func New(file1, file2 string, cache int, handles int, namespace string, readonly
 
 const TIME_INTERVAL = 1
 
-func (d *Database) BackgroundMigration() {
-	var errc chan error
+func (d *Database) BackgroundMigration() error {
 	ticker := time.NewTicker(TIME_INTERVAL * time.Second)
 	defer ticker.Stop()
-
-	go func() {
-		for i := 1; errc == nil; i++ {
-			select {
-			case <-ticker.C:
-				if err := d.backgroundMigration(); err != nil {
-					d.log.Error("Background Migration Failed", "err", err)
-				} else {
-					fmt.Println("Background Migration Success")
-				}
-			case errc = <-d.quitChan:
-			}
-		}
-	}()
-
-	select {}
-}
-
-func (d *Database) backgroundMigration() error {
-	iter := d.NewIteratorForMigration(prefixHDD, nil).(*pebbleIterator)
-	defer iter.ReleaseHotHDD()
-	batchHot := d.hotDb.NewBatch()
-	defer batchHot.Close()
 	batchCold := &batch{
 		bHot:  d.hotDb.NewBatch(),
 		bCold: d.coldDb.NewBatch(),
 		db:    d,
 	}
-	i := 0
-	for iter.NextHot() {
-		key := iter.Key()
-		value := iter.Value()
-		keyPrefixHDD := append(prefixHDD, key...)
-		batchCold.PutCold(keyPrefixHDD, value)
-		if err := batchHot.Delete(keyPrefixHDD, d.writeOptions); err != nil {
-			return err
+	defer batchCold.bHot.Close()
+	defer batchCold.bCold.Close()
+
+	for {
+		select {
+		case item, ok := <-d.migrationChan:
+			if !ok {
+				fmt.Println("Migration channel closed")
+				return nil
+			}
+			key, value := item[0], item[1]
+			batchCold.PutCold(key, value)
+		case <-ticker.C:
+			if batchCold.sizeCold == 0 {
+				continue
+			}
+			start := time.Now()
+			if err := batchCold.CommitCold(); err != nil {
+				return fmt.Errorf("failed to commit cold batch: %w", err)
+			}
+			end := time.Now()
+			fmt.Printf("cl: %v\n", end.Sub(start))
+			batchCold = &batch{
+				bHot:  d.hotDb.NewBatch(),
+				bCold: d.coldDb.NewBatch(),
+				db:    d,
+			}
 		}
-		i++
-		if i >= 1000000 {
-			break
-		}
 	}
-	if err := batchCold.CommitCold(); err != nil {
-		return err
-	}
-	if err := batchHot.Commit(d.writeOptions); err != nil {
-		return err
-	}
-	fmt.Println("Eviction Iteration :", i)
-	return nil
 }
+
 func (d *Database) NewIteratorForMigration(prefix []byte, start []byte) ethdb.Iterator {
 	iterHotHDD, _ := d.hotDb.NewIter(&pebble.IterOptions{
 		LowerBound: append(prefix, start...),
@@ -376,7 +364,7 @@ func (b *batch) CommitCold() error {
 	if b.db.closed {
 		return pebble.ErrClosed
 	}
-	if err := b.bCold.Commit(b.db.writeOptions); err != nil {
+	if err := b.bCold.Commit(b.db.writeOptionsCold); err != nil {
 		fmt.Println("dbCold Batch Write Error:", err)
 		return err
 	}
@@ -668,8 +656,8 @@ func (d *Database) Compact(start []byte, limit []byte) error {
 	wg.Add(1)
 	go compactDb(d.hotDb)
 
-	wg.Add(1)
-	go compactDb(d.coldDb)
+	// wg.Add(1)
+	// go compactDb(d.coldDb)
 
 	wg.Wait()
 
@@ -801,6 +789,11 @@ func (d *Database) meter(refresh time.Duration, namespace string) {
 // 	idx  int
 // }
 
+type ARYFORMIG struct {
+	key   []byte
+	value []byte
+}
+
 // batch is a write-only batch that commits changes to its host database
 // when Write is called. A batch cannot be used concurrently.
 type batch struct {
@@ -813,6 +806,7 @@ type batch struct {
 	// keys []LOGGING
 	// putkeys []LOGGING
 	// delkeys []LOGGING
+	putkeys []ARYFORMIG
 }
 
 func isPutHDD(idx int) bool {
@@ -835,6 +829,7 @@ func isPutHDD(idx int) bool {
 func (b *batch) Put(idx int, key, value []byte) error {
 	if isPutHDD(idx) {
 		key = append(prefixHDD, key...)
+		b.putkeys = append(b.putkeys, ARYFORMIG{key: key, value: value})
 	} else {
 		key = append(prefixSSD, key...)
 	}
@@ -846,12 +841,29 @@ func (b *batch) Put(idx int, key, value []byte) error {
 	return nil
 }
 
+func isDelHDD(idx int) bool {
+	var trieIdx = []int{-471, -481, -491}
+	var snapshotIdx = []int{-291, -301, -311, -331, -341, -351}
+	for _, i := range trieIdx {
+		if i == idx {
+			return true
+		}
+	}
+	for _, i := range snapshotIdx {
+		if i == idx {
+			return true
+		}
+	}
+	return false
+}
+
 // Delete inserts the key removal into the batch for later committing.
 func (b *batch) Delete(idx int, key []byte) error {
-	keyCold := append(prefixHDD, key...)
-	b.bCold.Delete(keyCold, nil)
-	b.sizeCold += len(keyCold)
-
+	if isDelHDD(idx) {
+		keyCold := append(prefixHDD, key...)
+		b.bCold.Delete(keyCold, nil)
+		b.sizeCold += len(keyCold)
+	}
 	keyHot := append(prefixSSD, key...)
 	b.bHot.Delete(keyHot, nil)
 	b.sizeHot += len(keyHot)
@@ -872,14 +884,18 @@ func (b *batch) Write(idx int) error {
 		b.db.quitLock.RUnlock()
 		return pebble.ErrClosed
 	}
-	if err := b.bHot.Commit(b.db.writeOptions); err != nil {
+	if err := b.bHot.Commit(b.db.writeOptionsHot); err != nil {
 		fmt.Println("dbHot Batch Write Error:", err)
 		return err
 	}
 	b.db.quitLock.RUnlock()
+	for _, k := range b.putkeys {
+		b.db.migrationChan <- [2][]byte{k.key, k.value}
+		// b.db.queue.Enqueue([2][]byte{k.key, k.value})
+	}
 	b.db.quitColdLock.RLock()
 	defer b.db.quitColdLock.RUnlock()
-	if err := b.bCold.Commit(b.db.writeOptions); err != nil {
+	if err := b.bCold.Commit(b.db.writeOptionsCold); err != nil {
 		fmt.Println("dbCold Batch Write Error:", err)
 		return err
 	}
