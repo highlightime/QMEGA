@@ -535,7 +535,7 @@ func dbPut(ctx *cli.Context) error {
 	if err == nil {
 		fmt.Printf("Previous value: %#x\n", data)
 	}
-	return db.Put(key, value)
+	return db.Put(52, key, value)
 }
 
 // dbDumpTrie shows the key-value slots of a given storage trie

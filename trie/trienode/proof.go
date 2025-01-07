@@ -44,7 +44,7 @@ func NewProofSet() *ProofSet {
 }
 
 // Put stores a new node in the set
-func (db *ProofSet) Put(key []byte, value []byte) error {
+func (db *ProofSet) Put(idx int, key []byte, value []byte) error {
 	db.lock.Lock()
 	defer db.lock.Unlock()
 
@@ -120,7 +120,7 @@ func (db *ProofSet) Store(target ethdb.KeyValueWriter) {
 	defer db.lock.RUnlock()
 
 	for key, value := range db.nodes {
-		target.Put([]byte(key), value)
+		target.Put(1, []byte(key), value)
 	}
 }
 
@@ -130,7 +130,7 @@ type ProofList []rlp.RawValue
 // Store writes the contents of the list to the given database
 func (n ProofList) Store(db ethdb.KeyValueWriter) {
 	for _, node := range n {
-		db.Put(crypto.Keccak256(node), node)
+		db.Put(2, crypto.Keccak256(node), node)
 	}
 }
 
@@ -142,7 +142,7 @@ func (n ProofList) Set() *ProofSet {
 }
 
 // Put stores a new node at the end of the list
-func (n *ProofList) Put(key []byte, value []byte) error {
+func (n *ProofList) Put(idx int, key []byte, value []byte) error {
 	*n = append(*n, value)
 	return nil
 }

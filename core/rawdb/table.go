@@ -126,8 +126,8 @@ func (t *table) AncientDatadir() (string, error) {
 
 // Put inserts the given value into the database at a prefixed version of the
 // provided key.
-func (t *table) Put(key []byte, value []byte) error {
-	return t.db.Put(append([]byte(t.prefix), key...), value)
+func (t *table) Put(idx int, key []byte, value []byte) error {
+	return t.db.Put(idx, append([]byte(t.prefix), key...), value)
 }
 
 // Delete removes the given prefixed key from the database.
@@ -215,8 +215,8 @@ type tableBatch struct {
 }
 
 // Put inserts the given value into the batch for later committing.
-func (b *tableBatch) Put(key, value []byte) error {
-	return b.batch.Put(append([]byte(b.prefix), key...), value)
+func (b *tableBatch) Put(idx int, key, value []byte) error {
+	return b.batch.Put(idx, append([]byte(b.prefix), key...), value)
 }
 
 // Delete inserts a key removal into the batch for later committing.
@@ -247,9 +247,9 @@ type tableReplayer struct {
 }
 
 // Put implements the interface KeyValueWriter.
-func (r *tableReplayer) Put(key []byte, value []byte) error {
+func (r *tableReplayer) Put(idx int, key []byte, value []byte) error {
 	trimmed := key[len(r.prefix):]
-	return r.w.Put(trimmed, value)
+	return r.w.Put(idx, trimmed, value)
 }
 
 // Delete implements the interface KeyValueWriter.

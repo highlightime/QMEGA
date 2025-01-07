@@ -198,7 +198,7 @@ func (db *Database) Get(key []byte) ([]byte, error) {
 }
 
 // Put inserts the given value into the key-value store.
-func (db *Database) Put(key []byte, value []byte) error {
+func (db *Database) Put(idx int, key []byte, value []byte) error {
 	return db.db.Put(key, value, nil)
 }
 
@@ -394,7 +394,7 @@ type batch struct {
 }
 
 // Put inserts the given value into the batch for later committing.
-func (b *batch) Put(key, value []byte) error {
+func (b *batch) Put(idx int, key, value []byte) error {
 	b.b.Put(key, value)
 	b.size += len(key) + len(value)
 	return nil
@@ -440,7 +440,7 @@ func (r *replayer) Put(key, value []byte) {
 	if r.failure != nil {
 		return
 	}
-	r.failure = r.writer.Put(key, value)
+	r.failure = r.writer.Put(0, key, value)
 }
 
 // Delete removes the key from the key-value data store.

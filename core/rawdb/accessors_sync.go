@@ -31,7 +31,7 @@ func ReadSkeletonSyncStatus(db ethdb.KeyValueReader) []byte {
 
 // WriteSkeletonSyncStatus stores the serialized sync status to save at shutdown.
 func WriteSkeletonSyncStatus(db ethdb.KeyValueWriter, status []byte) {
-	if err := db.Put(skeletonSyncStatusKey, status); err != nil {
+	if err := db.Put(37, skeletonSyncStatusKey, status); err != nil {
 		log.Crit("Failed to store skeleton sync status", "err", err)
 	}
 }
@@ -65,7 +65,7 @@ func WriteSkeletonHeader(db ethdb.KeyValueWriter, header *types.Header) {
 		log.Crit("Failed to RLP encode header", "err", err)
 	}
 	key := skeletonHeaderKey(header.Number.Uint64())
-	if err := db.Put(key, data); err != nil {
+	if err := db.Put(38, key, data); err != nil {
 		log.Crit("Failed to store skeleton header", "err", err)
 	}
 }
@@ -94,7 +94,7 @@ func ReadSnapSyncStatusFlag(db ethdb.KeyValueReader) uint8 {
 
 // WriteSnapSyncStatusFlag stores the state snap sync status flag into database.
 func WriteSnapSyncStatusFlag(db ethdb.KeyValueWriter, flag uint8) {
-	if err := db.Put(snapSyncStatusFlagKey, []byte{flag}); err != nil {
+	if err := db.Put(39, snapSyncStatusFlagKey, []byte{flag}); err != nil {
 		log.Crit("Failed to store sync status flag", "err", err)
 	}
 }

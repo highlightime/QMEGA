@@ -102,7 +102,7 @@ func (db *Database) Get(key []byte) ([]byte, error) {
 }
 
 // Put inserts the given value into the key-value store.
-func (db *Database) Put(key []byte, value []byte) error {
+func (db *Database) Put(idx int, key []byte, value []byte) error {
 	db.lock.Lock()
 	defer db.lock.Unlock()
 
@@ -221,7 +221,7 @@ type batch struct {
 }
 
 // Put inserts the given value into the batch for later committing.
-func (b *batch) Put(key, value []byte) error {
+func (b *batch) Put(idx int, key, value []byte) error {
 	b.writes = append(b.writes, keyvalue{string(key), common.CopyBytes(value), false})
 	b.size += len(key) + len(value)
 	return nil
@@ -272,7 +272,7 @@ func (b *batch) Replay(w ethdb.KeyValueWriter) error {
 			}
 			continue
 		}
-		if err := w.Put([]byte(keyvalue.key), keyvalue.value); err != nil {
+		if err := w.Put(0, []byte(keyvalue.key), keyvalue.value); err != nil {
 			return err
 		}
 	}

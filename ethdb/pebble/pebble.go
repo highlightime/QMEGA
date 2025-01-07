@@ -265,6 +265,9 @@ func New(file string, cache int, handles int, namespace string, readonly bool, e
 	db.seekCompGauge = metrics.GetOrRegisterGauge(namespace+"compact/seek", nil)
 	db.manualMemAllocGauge = metrics.GetOrRegisterGauge(namespace+"memory/manualalloc", nil)
 
+	// Print CPU max in setting
+	fmt.Printf("procs %d\n", runtime.GOMAXPROCS(0))
+
 	// Start up the metrics gathering and return
 	go db.meter(metricsGatheringInterval, namespace)
 	go db.migration()
@@ -366,14 +369,16 @@ func (d *Database) Get(key []byte) ([]byte, error) {
 }
 
 // Put inserts the given value into the key-value store.
-func (d *Database) Put(key []byte, value []byte) error {
+func (d *Database) Put(idx int, key []byte, value []byte) error {
 	d.quitLock.RLock()
 	defer d.quitLock.RUnlock()
 	if d.closed {
 		return pebble.ErrClosed
 	}
 	res := d.dbHot.Set(key, value, d.writeOptions)
-	d.migrationChan <- []ARYFORMIG{ARYFORMIG{key: key, value: value}}
+	if isPutHDD(idx) {
+		d.migrationChan <- []ARYFORMIG{ARYFORMIG{key: key, value: value}}
+	}
 	return res
 }
 
@@ -627,11 +632,29 @@ type ARYFORMIG struct {
 	value []byte
 }
 
+func isPutHDD(idx int) bool {
+	var trieIdx = []int{40, 41, 42}
+	var snapshotIdx = []int{27, 28, 29, 30, 31, 32}
+	for _, i := range trieIdx {
+		if i == idx {
+			return true
+		}
+	}
+	for _, i := range snapshotIdx {
+		if i == idx {
+			return true
+		}
+	}
+	return false
+}
+
 // Put inserts the given value into the batch for later committing.
-func (b *batch) Put(key, value []byte) error {
+func (b *batch) Put(idx int, key, value []byte) error {
+	if isPutHDD(idx) {
+		b.putkeys = append(b.putkeys, ARYFORMIG{key: key, value: value})
+	}
 	b.b.Set(key, value, nil)
 	b.size += len(key) + len(value)
-	b.putkeys = append(b.putkeys, ARYFORMIG{key: key, value: value})
 	return nil
 }
 
@@ -655,7 +678,9 @@ func (b *batch) Write() error {
 		return pebble.ErrClosed
 	}
 	res := b.b.Commit(b.db.writeOptions)
-	b.db.migrationChan <- b.putkeys
+	if len(b.putkeys) > 0 {
+		b.db.migrationChan <- b.putkeys
+	}
 
 	return res
 }
@@ -677,7 +702,7 @@ func (b *batch) Replay(w ethdb.KeyValueWriter) error {
 		// The (k,v) slices might be overwritten if the batch is reset/reused,
 		// and the receiver should copy them if they are to be retained long-term.
 		if kind == pebble.InternalKeyKindSet {
-			w.Put(k, v)
+			w.Put(0, k, v)
 		} else if kind == pebble.InternalKeyKindDelete {
 			w.Delete(k)
 		} else {

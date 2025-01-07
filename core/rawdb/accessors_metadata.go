@@ -48,7 +48,7 @@ func WriteDatabaseVersion(db ethdb.KeyValueWriter, version uint64) {
 	if err != nil {
 		log.Crit("Failed to encode database version", "err", err)
 	}
-	if err = db.Put(databaseVersionKey, enc); err != nil {
+	if err = db.Put(18, databaseVersionKey, enc); err != nil {
 		log.Crit("Failed to store the database version", "err", err)
 	}
 }
@@ -76,7 +76,7 @@ func WriteChainConfig(db ethdb.KeyValueWriter, hash common.Hash, cfg *params.Cha
 	if err != nil {
 		log.Crit("Failed to JSON encode chain config", "err", err)
 	}
-	if err := db.Put(configKey(hash), data); err != nil {
+	if err := db.Put(19, configKey(hash), data); err != nil {
 		log.Crit("Failed to store chain config", "err", err)
 	}
 }
@@ -90,7 +90,7 @@ func ReadGenesisStateSpec(db ethdb.KeyValueReader, blockhash common.Hash) []byte
 
 // WriteGenesisStateSpec writes the genesis state specification into the disk.
 func WriteGenesisStateSpec(db ethdb.KeyValueWriter, blockhash common.Hash, data []byte) {
-	if err := db.Put(genesisStateSpecKey(blockhash), data); err != nil {
+	if err := db.Put(20, genesisStateSpecKey(blockhash), data); err != nil {
 		log.Crit("Failed to store genesis state", "err", err)
 	}
 }
@@ -128,7 +128,7 @@ func PushUncleanShutdownMarker(db ethdb.KeyValueStore) ([]uint64, uint64, error)
 	}
 	// And save it again
 	data, _ := rlp.EncodeToBytes(uncleanShutdowns)
-	if err := db.Put(uncleanShutdownKey, data); err != nil {
+	if err := db.Put(21, uncleanShutdownKey, data); err != nil {
 		log.Warn("Failed to write unclean-shutdown marker", "err", err)
 		return nil, 0, err
 	}
@@ -148,7 +148,7 @@ func PopUncleanShutdownMarker(db ethdb.KeyValueStore) {
 		uncleanShutdowns.Recent = uncleanShutdowns.Recent[:l-1]
 	}
 	data, _ := rlp.EncodeToBytes(uncleanShutdowns)
-	if err := db.Put(uncleanShutdownKey, data); err != nil {
+	if err := db.Put(22, uncleanShutdownKey, data); err != nil {
 		log.Warn("Failed to clear unclean-shutdown marker", "err", err)
 	}
 }
@@ -170,7 +170,7 @@ func UpdateUncleanShutdownMarker(db ethdb.KeyValueStore) {
 	}
 	uncleanShutdowns.Recent[count-1] = uint64(time.Now().Unix())
 	data, _ := rlp.EncodeToBytes(uncleanShutdowns)
-	if err := db.Put(uncleanShutdownKey, data); err != nil {
+	if err := db.Put(23, uncleanShutdownKey, data); err != nil {
 		log.Warn("Failed to write unclean-shutdown marker", "err", err)
 	}
 }
@@ -183,7 +183,7 @@ func ReadTransitionStatus(db ethdb.KeyValueReader) []byte {
 
 // WriteTransitionStatus stores the eth2 transition status to the database
 func WriteTransitionStatus(db ethdb.KeyValueWriter, data []byte) {
-	if err := db.Put(transitionStatusKey, data); err != nil {
+	if err := db.Put(24, transitionStatusKey, data); err != nil {
 		log.Crit("Failed to store the eth2 transition status", "err", err)
 	}
 }

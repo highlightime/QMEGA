@@ -481,7 +481,7 @@ func (c *ChainIndexer) setValidSections(sections uint64) {
 	// Set the current number of valid sections in the database
 	var data [8]byte
 	binary.BigEndian.PutUint64(data[:], sections)
-	c.indexDb.Put([]byte("count"), data[:])
+	c.indexDb.Put(45, []byte("count"), data[:])
 
 	// Remove any reorged sections, caching the valids in the mean time
 	for c.storedSections > sections {
@@ -510,7 +510,7 @@ func (c *ChainIndexer) setSectionHead(section uint64, hash common.Hash) {
 	var data [8]byte
 	binary.BigEndian.PutUint64(data[:], section)
 
-	c.indexDb.Put(append([]byte("shead"), data[:]...), hash.Bytes())
+	c.indexDb.Put(46, append([]byte("shead"), data[:]...), hash.Bytes())
 }
 
 // removeSectionHead removes the reference to a processed section from the index

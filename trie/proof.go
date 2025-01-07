@@ -94,7 +94,7 @@ func (t *Trie) Prove(key []byte, proofDb ethdb.KeyValueWriter) error {
 			if !ok {
 				hash = hasher.hashData(enc)
 			}
-			proofDb.Put(hash, enc)
+			proofDb.Put(43, hash, enc)
 		}
 	}
 	return nil

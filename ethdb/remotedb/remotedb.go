@@ -86,7 +86,7 @@ func (db *Database) ReadAncients(fn func(op ethdb.AncientReaderOp) error) (err e
 	return fn(db)
 }
 
-func (db *Database) Put(key []byte, value []byte) error {
+func (db *Database) Put(idx int, key []byte, value []byte) error {
 	panic("not supported")
 }
 

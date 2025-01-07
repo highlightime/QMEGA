@@ -82,7 +82,7 @@ func (cs *canonicalStore[T]) add(backend ethdb.KeyValueWriter, period uint64, va
 	if err != nil {
 		return err
 	}
-	if err := backend.Put(cs.databaseKey(period), enc); err != nil {
+	if err := backend.Put(44, cs.databaseKey(period), enc); err != nil {
 		return err
 	}
 	cs.cache.Add(period, value)

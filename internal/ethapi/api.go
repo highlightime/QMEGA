@@ -694,7 +694,7 @@ type StorageResult struct {
 // hex-strings for delivery to rpc-caller.
 type proofList []string
 
-func (n *proofList) Put(key []byte, value []byte) error {
+func (n *proofList) Put(idx int, key []byte, value []byte) error {
 	*n = append(*n, hexutil.Encode(value))
 	return nil
 }
