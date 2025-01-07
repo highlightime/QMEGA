@@ -55,8 +55,9 @@ const (
 // Apart from basic data storage functionality it also supports batch writes and
 // iterating over the keyspace in binary-alphabetical order.
 type Database struct {
-	fn string     // filename for reporting
-	db *pebble.DB // Underlying pebble storage engine
+	fn     string     // filename for reporting
+	dbHot  *pebble.DB // Underlying pebble storage engine
+	dbCold *pebble.DB // Underlying pebble storage engine
 
 	compTimeMeter       metrics.Meter // Meter for measuring the total time spent in database compaction
 	compReadMeter       metrics.Meter // Meter for measuring the data read during compaction
@@ -74,9 +75,11 @@ type Database struct {
 
 	levelsGauge []metrics.Gauge // Gauge for tracking the number of tables in levels
 
-	quitLock sync.RWMutex    // Mutex protecting the quit channel and the closed flag
-	quitChan chan chan error // Quit channel to stop the metrics collection before closing the database
-	closed   bool            // keep track of whether we're Closed
+	quitLock      sync.RWMutex    // Mutex protecting the quit channel and the closed flag
+	quitChan      chan chan error // Quit channel to stop the metrics collection before closing the database
+	migrationChan chan []ARYFORMIG
+	closed        bool // keep track of whether we're Closed
+	kvCnt         atomic.Int64
 
 	log log.Logger // Contextual logger tracking the database path
 
@@ -182,10 +185,11 @@ func New(file string, cache int, handles int, namespace string, readonly bool, e
 		memTableSize = maxMemTableSize - 1
 	}
 	db := &Database{
-		fn:           file,
-		log:          logger,
-		quitChan:     make(chan chan error),
-		writeOptions: &pebble.WriteOptions{Sync: !ephemeral},
+		fn:            file,
+		log:           logger,
+		quitChan:      make(chan chan error),
+		migrationChan: make(chan []ARYFORMIG, 1000),
+		writeOptions:  &pebble.WriteOptions{Sync: !ephemeral},
 	}
 	opt := &pebble.Options{
 		// Pebble has a single combined cache area and the write
@@ -234,11 +238,18 @@ func New(file string, cache int, handles int, namespace string, readonly bool, e
 	opt.Experimental.ReadSamplingMultiplier = -1
 
 	// Open the db and recover any potential corruptions
-	innerDB, err := pebble.Open(file, opt)
+	innerDB1, err := pebble.Open(file, opt)
 	if err != nil {
 		return nil, err
 	}
-	db.db = innerDB
+	db.dbHot = innerDB1
+
+	file2 := "/home/yhseo/nvme/ethereum/execution/data/geth/chaindata/ancient/chain"
+	innerDB2, err := pebble.Open(file2, opt)
+	if err != nil {
+		return nil, err
+	}
+	db.dbCold = innerDB2
 
 	db.compTimeMeter = metrics.GetOrRegisterMeter(namespace+"compact/time", nil)
 	db.compReadMeter = metrics.GetOrRegisterMeter(namespace+"compact/input", nil)
@@ -256,7 +267,47 @@ func New(file string, cache int, handles int, namespace string, readonly bool, e
 
 	// Start up the metrics gathering and return
 	go db.meter(metricsGatheringInterval, namespace)
+	go db.migration()
 	return db, nil
+}
+
+func (d *Database) migration() error {
+	batch1 := &batch{
+		b:  d.dbCold.NewBatch(),
+		db: d,
+	}
+	defer batch1.b.Close()
+	for {
+		select {
+		case putkeys := <-d.migrationChan:
+			for _, putkey := range putkeys {
+				batch1.PutCold(putkey.key, putkey.value)
+				d.kvCnt.Add(1)
+			}
+			if d.kvCnt.Load() >= 1500 {
+				if err := batch1.WriteCold(); err != nil {
+					return err
+				}
+				d.kvCnt.Store(0)
+				batch1 = &batch{
+					b:  d.dbCold.NewBatch(),
+					db: d,
+				}
+			}
+		case <-d.quitChan:
+			return nil
+		}
+	}
+}
+
+func (b *batch) PutCold(key, value []byte) error {
+	b.b.Set(key, value, nil)
+	b.size += len(key) + len(value)
+	return nil
+}
+
+func (b *batch) WriteCold() error {
+	return b.b.Commit(b.db.writeOptions)
 }
 
 // Close stops the metrics collection, flushes any pending data to disk and closes
@@ -277,7 +328,7 @@ func (d *Database) Close() error {
 		}
 		d.quitChan = nil
 	}
-	return d.db.Close()
+	return d.dbHot.Close()
 }
 
 // Has retrieves if a key is present in the key-value store.
@@ -287,7 +338,7 @@ func (d *Database) Has(key []byte) (bool, error) {
 	if d.closed {
 		return false, pebble.ErrClosed
 	}
-	_, closer, err := d.db.Get(key)
+	_, closer, err := d.dbHot.Get(key)
 	if err == pebble.ErrNotFound {
 		return false, nil
 	} else if err != nil {
@@ -304,7 +355,7 @@ func (d *Database) Get(key []byte) ([]byte, error) {
 	if d.closed {
 		return nil, pebble.ErrClosed
 	}
-	dat, closer, err := d.db.Get(key)
+	dat, closer, err := d.dbHot.Get(key)
 	if err != nil {
 		return nil, err
 	}
@@ -321,7 +372,9 @@ func (d *Database) Put(key []byte, value []byte) error {
 	if d.closed {
 		return pebble.ErrClosed
 	}
-	return d.db.Set(key, value, d.writeOptions)
+	res := d.dbHot.Set(key, value, d.writeOptions)
+	d.migrationChan <- []ARYFORMIG{ARYFORMIG{key: key, value: value}}
+	return res
 }
 
 // Delete removes the key from the key-value store.
@@ -331,14 +384,14 @@ func (d *Database) Delete(key []byte) error {
 	if d.closed {
 		return pebble.ErrClosed
 	}
-	return d.db.Delete(key, nil)
+	return d.dbHot.Delete(key, nil)
 }
 
 // NewBatch creates a write-only key-value store that buffers changes to its host
 // database until a final write is called.
 func (d *Database) NewBatch() ethdb.Batch {
 	return &batch{
-		b:  d.db.NewBatch(),
+		b:  d.dbHot.NewBatch(),
 		db: d,
 	}
 }
@@ -346,7 +399,7 @@ func (d *Database) NewBatch() ethdb.Batch {
 // NewBatchWithSize creates a write-only database batch with pre-allocated buffer.
 func (d *Database) NewBatchWithSize(size int) ethdb.Batch {
 	return &batch{
-		b:  d.db.NewBatchWithSize(size),
+		b:  d.dbHot.NewBatchWithSize(size),
 		db: d,
 	}
 }
@@ -362,7 +415,7 @@ type snapshot struct {
 // Note don't forget to release the snapshot once it's used up, otherwise
 // the stale data will never be cleaned up by the underlying compactor.
 func (d *Database) NewSnapshot() (ethdb.Snapshot, error) {
-	snap := d.db.NewSnapshot()
+	snap := d.dbHot.NewSnapshot()
 	return &snapshot{db: snap}, nil
 }
 
@@ -420,7 +473,7 @@ func upperBound(prefix []byte) (limit []byte) {
 //
 // The property is unused in Pebble as there's only one thing to retrieve.
 func (d *Database) Stat(property string) (string, error) {
-	return d.db.Metrics().String(), nil
+	return d.dbHot.Metrics().String(), nil
 }
 
 // Compact flattens the underlying data store for the given key range. In essence,
@@ -442,7 +495,7 @@ func (d *Database) Compact(start []byte, limit []byte) error {
 	if limit == nil {
 		limit = bytes.Repeat([]byte{0xff}, 32)
 	}
-	return d.db.Compact(start, limit, true) // Parallelization is preferred
+	return d.dbHot.Compact(start, limit, true) // Parallelization is preferred
 }
 
 // Path returns the path to the database directory.
@@ -477,7 +530,7 @@ func (d *Database) meter(refresh time.Duration, namespace string) {
 			compRead  int64
 			nWrite    int64
 
-			stats              = d.db.Metrics()
+			stats              = d.dbHot.Metrics()
 			compTime           = d.compTime.Load()
 			writeDelayCount    = d.writeDelayCount.Load()
 			writeDelayTime     = d.writeDelayTime.Load()
@@ -563,15 +616,22 @@ func (d *Database) meter(refresh time.Duration, namespace string) {
 // batch is a write-only batch that commits changes to its host database
 // when Write is called. A batch cannot be used concurrently.
 type batch struct {
-	b    *pebble.Batch
-	db   *Database
-	size int
+	b       *pebble.Batch
+	db      *Database
+	putkeys []ARYFORMIG
+	size    int
+}
+
+type ARYFORMIG struct {
+	key   []byte
+	value []byte
 }
 
 // Put inserts the given value into the batch for later committing.
 func (b *batch) Put(key, value []byte) error {
 	b.b.Set(key, value, nil)
 	b.size += len(key) + len(value)
+	b.putkeys = append(b.putkeys, ARYFORMIG{key: key, value: value})
 	return nil
 }
 
@@ -594,7 +654,10 @@ func (b *batch) Write() error {
 	if b.db.closed {
 		return pebble.ErrClosed
 	}
-	return b.b.Commit(b.db.writeOptions)
+	res := b.b.Commit(b.db.writeOptions)
+	b.db.migrationChan <- b.putkeys
+
+	return res
 }
 
 // Reset resets the batch for reuse.
@@ -638,7 +701,7 @@ type pebbleIterator struct {
 // of database content with a particular key prefix, starting at a particular
 // initial key (or after, if it does not exist).
 func (d *Database) NewIterator(prefix []byte, start []byte) ethdb.Iterator {
-	iter, _ := d.db.NewIter(&pebble.IterOptions{
+	iter, _ := d.dbHot.NewIter(&pebble.IterOptions{
 		LowerBound: append(prefix, start...),
 		UpperBound: upperBound(prefix),
 	})
