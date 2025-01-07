@@ -94,7 +94,8 @@ type Database struct {
 	writeDelayCount     atomic.Int64 // Total number of write stall counts
 	writeDelayTime      atomic.Int64 // Total time spent in write stalls
 
-	writeOptions *pebble.WriteOptions
+	writeOptions     *pebble.WriteOptions
+	writeOptionsCold *pebble.WriteOptions
 }
 
 func (d *Database) onCompactionBegin(info pebble.CompactionInfo) {
@@ -185,11 +186,12 @@ func New(file string, cache int, handles int, namespace string, readonly bool, e
 		memTableSize = maxMemTableSize - 1
 	}
 	db := &Database{
-		fn:            file,
-		log:           logger,
-		quitChan:      make(chan chan error),
-		migrationChan: make(chan []ARYFORMIG, 1000),
-		writeOptions:  &pebble.WriteOptions{Sync: !ephemeral},
+		fn:               file,
+		log:              logger,
+		quitChan:         make(chan chan error),
+		migrationChan:    make(chan []ARYFORMIG, 1000),
+		writeOptions:     &pebble.WriteOptions{Sync: !ephemeral},
+		writeOptionsCold: &pebble.WriteOptions{Sync: false},
 	}
 	opt := &pebble.Options{
 		// Pebble has a single combined cache area and the write
@@ -243,9 +245,10 @@ func New(file string, cache int, handles int, namespace string, readonly bool, e
 		return nil, err
 	}
 	db.dbHot = innerDB1
-
+	opt2 := opt
+	opt2.DisableWAL = true
 	file2 := "/home/yhseo/nvme/ethereum/execution/data/geth/chaindata/ancient/chain"
-	innerDB2, err := pebble.Open(file2, opt)
+	innerDB2, err := pebble.Open(file2, opt2)
 	if err != nil {
 		return nil, err
 	}
@@ -310,7 +313,7 @@ func (b *batch) PutCold(key, value []byte) error {
 }
 
 func (b *batch) WriteCold() error {
-	return b.b.Commit(b.db.writeOptions)
+	return b.b.Commit(b.db.writeOptionsCold)
 }
 
 // Close stops the metrics collection, flushes any pending data to disk and closes
