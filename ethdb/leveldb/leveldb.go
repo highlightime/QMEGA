@@ -99,7 +99,7 @@ func New(file string, cache int, handles int, namespace string, readonly bool) (
 		options.OpenFilesCacheCapacity = handles
 		options.BlockCacheCapacity = cache / 2 * opt.MiB
 		options.WriteBuffer = cache / 4 * opt.MiB // Two of these are used internally
-		options.NoSync = true
+		// options.NoSync = true
 		if readonly {
 			options.ReadOnly = true
 		}

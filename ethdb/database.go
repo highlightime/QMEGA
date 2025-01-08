@@ -32,7 +32,6 @@ type KeyValueReader interface {
 type KeyValueWriter interface {
 	// Put inserts the given value into the key-value data store.
 	Put(idx int, key []byte, value []byte) error
-
 	// Delete removes the key from the key-value data store.
 	Delete(key []byte) error
 }

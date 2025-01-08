@@ -78,7 +78,7 @@ type Database struct {
 
 	quitLock      sync.RWMutex    // Mutex protecting the quit channel and the closed flag
 	quitChan      chan chan error // Quit channel to stop the metrics collection before closing the database
-	migrationChan chan *[]*ARYFORMIG
+	migrationChan chan []ARYFORMIG
 	closed        bool // keep track of whether we're Closed
 	kvCnt         atomic.Int64
 
@@ -95,8 +95,7 @@ type Database struct {
 	writeDelayCount     atomic.Int64 // Total number of write stall counts
 	writeDelayTime      atomic.Int64 // Total time spent in write stalls
 
-	writeOptions     *pebble.WriteOptions
-	writeOptionsCold *pebble.WriteOptions
+	writeOptions *pebble.WriteOptions
 }
 
 func (d *Database) onCompactionBegin(info pebble.CompactionInfo) {
@@ -187,12 +186,11 @@ func New(file string, cache int, handles int, namespace string, readonly bool, e
 		memTableSize = maxMemTableSize - 1
 	}
 	db := &Database{
-		fn:               file,
-		log:              logger,
-		quitChan:         make(chan chan error),
-		migrationChan:    make(chan *[]*ARYFORMIG, 100000),
-		writeOptions:     &pebble.WriteOptions{Sync: !ephemeral},
-		writeOptionsCold: &pebble.WriteOptions{Sync: false},
+		fn:            file,
+		log:           logger,
+		quitChan:      make(chan chan error),
+		migrationChan: make(chan []ARYFORMIG, 100000),
+		writeOptions:  &pebble.WriteOptions{Sync: !ephemeral},
 	}
 	opt := &pebble.Options{
 		// Pebble has a single combined cache area and the write
@@ -246,8 +244,9 @@ func New(file string, cache int, handles int, namespace string, readonly bool, e
 		return nil, err
 	}
 	db.dbHot = innerDB1
-	opt2 := opt
-	opt2.DisableWAL = true
+	// opt2 := opt
+	// opt2.DisableWAL = true
+	fmt.Println("wal: ", opt.DisableWAL)
 	file2 := "/home/yhseo/nvme/ethereum/execution/data/geth/chaindata/ancient/chain"
 	innerDB2, err := leveldb.New(file2, cache, handles, namespace, readonly)
 	if err != nil {
@@ -287,22 +286,23 @@ func (d *Database) migration() error {
 	for {
 		select {
 		case putkeys := <-d.migrationChan:
-			for _, putkey := range *putkeys {
-				batch1.b.Put(0, *putkey.key, *putkey.value)
-				if err := batch2.Delete(*putkey.key, d.writeOptions); err != nil {
-					return err
+			for _, putkey := range putkeys {
+				batch1.PutCold(putkey.key, putkey.value)
+				if err := batch2.Delete(putkey.key, d.writeOptions); err != nil {
+					panic(err)
+					// return err
 				}
-				d.kvCnt.Add(1)
 			}
+			d.kvCnt.Add(int64(len(putkeys)))
+
 			if d.kvCnt.Load() >= 1500 {
+				d.kvCnt.Store(0)
 				if err := batch1.b.Write(); err != nil {
 					d.log.Error("ColdDB Put Commit failed", "err", err)
 				}
 				if err := batch2.Commit(d.writeOptions); err != nil {
 					d.log.Error("HotDB Delete Commit failed", "err", err)
 				}
-
-				d.kvCnt.Store(0)
 				batch1 = &coldBatch{
 					b:  d.dbCold.NewBatch(),
 					db: d,
@@ -315,14 +315,9 @@ func (d *Database) migration() error {
 	}
 }
 
-func (b *batch) PutCold(key, value []byte) error {
-	b.b.Set(key, value, nil)
-	b.size += len(key) + len(value)
+func (b *coldBatch) PutCold(key, value []byte) error {
+	b.b.Put(0, key, value)
 	return nil
-}
-
-func (b *batch) WriteCold() error {
-	return b.b.Commit(b.db.writeOptionsCold)
 }
 
 // Close stops the metrics collection, flushes any pending data to disk and closes
@@ -363,7 +358,7 @@ func (d *Database) Has(key []byte) (bool, error) {
 	} else if err != nil {
 		return false, err
 	}
-	closer.Close()
+	defer closer.Close()
 	return true, nil
 }
 
@@ -376,18 +371,19 @@ func (d *Database) Get(key []byte) ([]byte, error) {
 	}
 	dat, closer, err := d.dbHot.Get(key)
 	if err != nil {
-		dat, err = d.dbCold.Get(key)
-		if err == nil {
-			ret := make([]byte, len(dat))
-			copy(ret, dat)
-			closer.Close()
-			return ret, nil
+		if err == pebble.ErrNotFound {
+			dat, err = d.dbCold.Get(key)
+			if err == nil && dat != nil {
+				ret := make([]byte, len(dat))
+				copy(ret, dat)
+				return ret, nil
+			}
 		}
 		return nil, err
 	}
 	ret := make([]byte, len(dat))
 	copy(ret, dat)
-	closer.Close()
+	defer closer.Close()
 	return ret, nil
 }
 
@@ -400,7 +396,7 @@ func (d *Database) Put(idx int, key []byte, value []byte) error {
 	}
 	res := d.dbHot.Set(key, value, d.writeOptions)
 	if isPutHDD(idx) {
-		d.migrationChan <- &[]*ARYFORMIG{&ARYFORMIG{key: &key, value: &value}}
+		d.migrationChan <- []ARYFORMIG{ARYFORMIG{key: key, value: value}}
 		// go d.migrationNew(&[]*ARYFORMIG{&ARYFORMIG{key: &key, value: &value}})
 	}
 	return res
@@ -458,7 +454,7 @@ func (d *Database) NewSnapshot() (ethdb.Snapshot, error) {
 func (snap *snapshot) Has(key []byte) (bool, error) {
 	_, closer, err := snap.dbHot.Get(key)
 	if err != nil {
-		if err != pebble.ErrNotFound {
+		if err == pebble.ErrNotFound {
 			_, err = snap.dbCold.Get(key)
 			if err == nil {
 				return true, nil
@@ -468,7 +464,7 @@ func (snap *snapshot) Has(key []byte) (bool, error) {
 			return false, nil
 		}
 	}
-	closer.Close()
+	defer closer.Close()
 	return true, nil
 }
 
@@ -477,18 +473,19 @@ func (snap *snapshot) Has(key []byte) (bool, error) {
 func (snap *snapshot) Get(key []byte) ([]byte, error) {
 	dat, closer, err := snap.dbHot.Get(key)
 	if err != nil {
-		dat, err = snap.dbCold.Get(key)
-		if err == nil {
-			ret := make([]byte, len(dat))
-			copy(ret, dat)
-			closer.Close()
-			return ret, nil
+		if err == pebble.ErrNotFound {
+			dat, err = snap.dbCold.Get(key)
+			if err == nil {
+				ret := make([]byte, len(dat))
+				copy(ret, dat)
+				return ret, nil
+			}
 		}
 		return nil, err
 	}
 	ret := make([]byte, len(dat))
 	copy(ret, dat)
-	closer.Close()
+	defer closer.Close()
 	return ret, nil
 }
 
@@ -664,7 +661,7 @@ func (d *Database) meter(refresh time.Duration, namespace string) {
 type batch struct {
 	b       *pebble.Batch
 	db      *Database
-	putkeys []*ARYFORMIG
+	putkeys []ARYFORMIG
 	size    int
 }
 
@@ -676,8 +673,8 @@ type coldBatch struct {
 }
 
 type ARYFORMIG struct {
-	key   *[]byte
-	value *[]byte
+	key   []byte
+	value []byte
 }
 
 func isPutHDD(idx int) bool {
@@ -699,7 +696,7 @@ func isPutHDD(idx int) bool {
 // Put inserts the given value into the batch for later committing.
 func (b *batch) Put(idx int, key, value []byte) error {
 	if isPutHDD(idx) {
-		b.putkeys = append(b.putkeys, &ARYFORMIG{key: &key, value: &value})
+		b.putkeys = append(b.putkeys, ARYFORMIG{key: key, value: value})
 	}
 	b.b.Set(key, value, nil)
 	b.size += len(key) + len(value)
@@ -727,7 +724,7 @@ func (b *batch) Write() error {
 	}
 	res := b.b.Commit(b.db.writeOptions)
 	if len(b.putkeys) > 0 {
-		b.db.migrationChan <- &b.putkeys
+		b.db.migrationChan <- b.putkeys
 		// go b.db.migrationNew(&b.putkeys)
 	}
 
@@ -780,21 +777,26 @@ func (b *batch) Replay(w ethdb.KeyValueWriter) error {
 //
 // The pebble iterator is not thread-safe.
 type pebbleIterator struct {
-	iter     *pebble.Iterator
-	moved    bool
-	released bool
+	iterHot   *pebble.Iterator
+	iterCold  ethdb.Iterator
+	validHot  bool
+	validCold bool
+	moved     bool
+	released  bool
+	turn      bool
 }
 
 // NewIterator creates a binary-alphabetical iterator over a subset
 // of database content with a particular key prefix, starting at a particular
 // initial key (or after, if it does not exist).
 func (d *Database) NewIterator(prefix []byte, start []byte) ethdb.Iterator {
-	iter, _ := d.dbHot.NewIter(&pebble.IterOptions{
+	iterHot, _ := d.dbHot.NewIter(&pebble.IterOptions{
 		LowerBound: append(prefix, start...),
 		UpperBound: upperBound(prefix),
 	})
-	iter.First()
-	return &pebbleIterator{iter: iter, moved: true, released: false}
+	iterCold := d.dbCold.NewIterator(prefix, start)
+	iterHot.First()
+	return &pebbleIterator{iterHot: iterHot, iterCold: iterCold, moved: true, released: false}
 }
 
 // Next moves the iterator to the next key/value pair. It returns whether the
@@ -802,36 +804,90 @@ func (d *Database) NewIterator(prefix []byte, start []byte) ethdb.Iterator {
 func (iter *pebbleIterator) Next() bool {
 	if iter.moved {
 		iter.moved = false
-		return iter.iter.Valid()
+		iter.validHot = iter.iterHot.Valid()
+		iter.validCold = iter.iterCold.Next()
+		if iter.validHot && iter.validCold {
+			res := bytes.Compare(iter.iterHot.Key(), iter.iterCold.Key())
+			if res < 0 {
+				iter.turn = true
+			} else if res > 0 {
+				iter.turn = false
+			} else {
+				iter.turn = true
+				iter.validCold = iter.iterCold.Next()
+			}
+		} else if iter.validHot {
+			iter.turn = true
+		} else if iter.validCold {
+			iter.turn = false
+		}
+		return iter.validHot || iter.validCold
 	}
-	return iter.iter.Next()
+	if iter.turn {
+		iter.validHot = iter.iterHot.Next()
+	} else {
+		iter.validCold = iter.iterCold.Next()
+	}
+
+	if iter.validHot && iter.validCold {
+		res := bytes.Compare(iter.iterHot.Key(), iter.iterCold.Key())
+		if res > 0 {
+			iter.turn = false
+		} else if res < 0 {
+			iter.turn = true
+		} else {
+			if iter.turn {
+				iter.validCold = iter.iterCold.Next()
+			} else {
+				iter.validHot = iter.iterHot.Next()
+			}
+			if iter.validHot {
+				iter.turn = true
+			} else {
+				iter.turn = false
+			}
+		}
+	} else if iter.validHot {
+		iter.turn = true
+	} else if iter.validCold {
+		iter.turn = false
+	}
+
+	return iter.validHot || iter.validCold
 }
 
 // Error returns any accumulated error. Exhausting all the key/value pairs
 // is not considered to be an error.
 func (iter *pebbleIterator) Error() error {
-	return iter.iter.Error()
+	return iter.iterHot.Error()
 }
 
 // Key returns the key of the current key/value pair, or nil if done. The caller
 // should not modify the contents of the returned slice, and its contents may
 // change on the next call to Next.
 func (iter *pebbleIterator) Key() []byte {
-	return iter.iter.Key()
+	if iter.turn {
+		return iter.iterHot.Key()
+	}
+	return iter.iterCold.Key()
 }
 
 // Value returns the value of the current key/value pair, or nil if done. The
 // caller should not modify the contents of the returned slice, and its contents
 // may change on the next call to Next.
 func (iter *pebbleIterator) Value() []byte {
-	return iter.iter.Value()
+	if iter.turn {
+		return iter.iterHot.Value()
+	}
+	return iter.iterCold.Value()
 }
 
 // Release releases associated resources. Release should always succeed and can
 // be called multiple times without causing error.
 func (iter *pebbleIterator) Release() {
 	if !iter.released {
-		iter.iter.Close()
+		iter.iterHot.Close()
+		iter.iterCold.Release()
 		iter.released = true
 	}
 }
