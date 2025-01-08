@@ -29,6 +29,7 @@ import (
 	"github.com/cockroachdb/pebble/bloom"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/ethdb"
+	"github.com/ethereum/go-ethereum/ethdb/leveldb"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/metrics"
 )
@@ -55,9 +56,9 @@ const (
 // Apart from basic data storage functionality it also supports batch writes and
 // iterating over the keyspace in binary-alphabetical order.
 type Database struct {
-	fn     string     // filename for reporting
-	dbHot  *pebble.DB // Underlying pebble storage engine
-	dbCold *pebble.DB // Underlying pebble storage engine
+	fn     string            // filename for reporting
+	dbHot  *pebble.DB        // Underlying pebble storage engine
+	dbCold *leveldb.Database // Underlying pebble storage engine
 
 	compTimeMeter       metrics.Meter // Meter for measuring the total time spent in database compaction
 	compReadMeter       metrics.Meter // Meter for measuring the data read during compaction
@@ -77,7 +78,7 @@ type Database struct {
 
 	quitLock      sync.RWMutex    // Mutex protecting the quit channel and the closed flag
 	quitChan      chan chan error // Quit channel to stop the metrics collection before closing the database
-	migrationChan chan []ARYFORMIG
+	migrationChan chan *[]*ARYFORMIG
 	closed        bool // keep track of whether we're Closed
 	kvCnt         atomic.Int64
 
@@ -189,7 +190,7 @@ func New(file string, cache int, handles int, namespace string, readonly bool, e
 		fn:               file,
 		log:              logger,
 		quitChan:         make(chan chan error),
-		migrationChan:    make(chan []ARYFORMIG, 1000),
+		migrationChan:    make(chan *[]*ARYFORMIG, 100000),
 		writeOptions:     &pebble.WriteOptions{Sync: !ephemeral},
 		writeOptionsCold: &pebble.WriteOptions{Sync: false},
 	}
@@ -248,7 +249,7 @@ func New(file string, cache int, handles int, namespace string, readonly bool, e
 	opt2 := opt
 	opt2.DisableWAL = true
 	file2 := "/home/yhseo/nvme/ethereum/execution/data/geth/chaindata/ancient/chain"
-	innerDB2, err := pebble.Open(file2, opt2)
+	innerDB2, err := leveldb.New(file2, cache, handles, namespace, readonly)
 	if err != nil {
 		return nil, err
 	}
@@ -270,7 +271,6 @@ func New(file string, cache int, handles int, namespace string, readonly bool, e
 
 	// Print CPU max in setting
 	fmt.Printf("procs %d\n", runtime.GOMAXPROCS(0))
-
 	// Start up the metrics gathering and return
 	go db.meter(metricsGatheringInterval, namespace)
 	go db.migration()
@@ -278,24 +278,23 @@ func New(file string, cache int, handles int, namespace string, readonly bool, e
 }
 
 func (d *Database) migration() error {
-	batch1 := &batch{
+	batch1 := &coldBatch{
 		b:  d.dbCold.NewBatch(),
 		db: d,
 	}
-	defer batch1.b.Close()
 	for {
 		select {
 		case putkeys := <-d.migrationChan:
-			for _, putkey := range putkeys {
-				batch1.PutCold(putkey.key, putkey.value)
+			for _, putkey := range *putkeys {
+				batch1.b.Put(0, *putkey.key, *putkey.value)
 				d.kvCnt.Add(1)
 			}
 			if d.kvCnt.Load() >= 1500 {
-				if err := batch1.WriteCold(); err != nil {
-					return err
+				if err := batch1.b.Write(); err != nil {
+					d.log.Error("Migration failed", "err", err)
 				}
 				d.kvCnt.Store(0)
-				batch1 = &batch{
+				batch1 = &coldBatch{
 					b:  d.dbCold.NewBatch(),
 					db: d,
 				}
@@ -380,7 +379,8 @@ func (d *Database) Put(idx int, key []byte, value []byte) error {
 	}
 	res := d.dbHot.Set(key, value, d.writeOptions)
 	if isPutHDD(idx) {
-		d.migrationChan <- []ARYFORMIG{ARYFORMIG{key: key, value: value}}
+		d.migrationChan <- &[]*ARYFORMIG{&ARYFORMIG{key: &key, value: &value}}
+		// go d.migrationNew(&[]*ARYFORMIG{&ARYFORMIG{key: &key, value: &value}})
 	}
 	return res
 }
@@ -626,13 +626,20 @@ func (d *Database) meter(refresh time.Duration, namespace string) {
 type batch struct {
 	b       *pebble.Batch
 	db      *Database
-	putkeys []ARYFORMIG
+	putkeys []*ARYFORMIG
 	size    int
 }
 
+type coldBatch struct {
+	b  ethdb.Batch
+	db *Database
+	// putkeys []*ARYFORMIG
+	// size    int
+}
+
 type ARYFORMIG struct {
-	key   []byte
-	value []byte
+	key   *[]byte
+	value *[]byte
 }
 
 func isPutHDD(idx int) bool {
@@ -654,7 +661,7 @@ func isPutHDD(idx int) bool {
 // Put inserts the given value into the batch for later committing.
 func (b *batch) Put(idx int, key, value []byte) error {
 	if isPutHDD(idx) {
-		b.putkeys = append(b.putkeys, ARYFORMIG{key: key, value: value})
+		b.putkeys = append(b.putkeys, &ARYFORMIG{key: &key, value: &value})
 	}
 	b.b.Set(key, value, nil)
 	b.size += len(key) + len(value)
@@ -682,11 +689,26 @@ func (b *batch) Write() error {
 	}
 	res := b.b.Commit(b.db.writeOptions)
 	if len(b.putkeys) > 0 {
-		b.db.migrationChan <- b.putkeys
+		b.db.migrationChan <- &b.putkeys
+		// go b.db.migrationNew(&b.putkeys)
 	}
 
 	return res
 }
+
+// func (d *Database) migrationNew(putkeys *[]*ARYFORMIG) {
+// 	batch1 := &coldBatch{
+// 		b:  d.dbCold.NewBatch(),
+// 		db: d,
+// 	}
+
+// 	for _, putkey := range *putkeys {
+// 		batch1.b.Put(0, *putkey.key, *putkey.value)
+// 	}
+// 	if err := batch1.b.Write(); err != nil {
+// 		d.log.Error("Migration failed", "err", err)
+// 	}
+// }
 
 // Reset resets the batch for reuse.
 func (b *batch) Reset() {
