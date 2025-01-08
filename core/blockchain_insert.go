@@ -17,6 +17,10 @@
 package core
 
 import (
+	"bytes"
+	"fmt"
+	"os"
+	"os/exec"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -82,6 +86,19 @@ func (st *insertStats) report(chain []*types.Block, index int, snapDiffItems, sn
 		}
 		if setHead {
 			log.Info("Imported new chain segment", context...)
+			if end.Number().Uint64() > 1000000 {
+				cmd := exec.Command("df")
+				var out bytes.Buffer
+				cmd.Stdout = &out
+				err := cmd.Run()
+				if err != nil {
+					fmt.Printf("Error executing df command: %v\n", err)
+					return
+				}
+				fmt.Println("df")
+				fmt.Println(out.String())
+				os.Exit(0)
+			}
 		} else {
 			log.Info("Imported new potential chain segment", context...)
 		}
