@@ -355,6 +355,10 @@ func (d *Database) Has(key []byte) (bool, error) {
 	}
 	_, closer, err := d.dbHot.Get(key)
 	if err == pebble.ErrNotFound {
+		_, err = d.dbCold.Get(key)
+		if err == nil {
+			return true, nil
+		}
 		return false, nil
 	} else if err != nil {
 		return false, err
@@ -372,6 +376,13 @@ func (d *Database) Get(key []byte) ([]byte, error) {
 	}
 	dat, closer, err := d.dbHot.Get(key)
 	if err != nil {
+		dat, err = d.dbCold.Get(key)
+		if err == nil {
+			ret := make([]byte, len(dat))
+			copy(ret, dat)
+			closer.Close()
+			return ret, nil
+		}
 		return nil, err
 	}
 	ret := make([]byte, len(dat))
@@ -424,7 +435,8 @@ func (d *Database) NewBatchWithSize(size int) ethdb.Batch {
 
 // snapshot wraps a pebble snapshot for implementing the Snapshot interface.
 type snapshot struct {
-	db *pebble.Snapshot
+	dbHot  *pebble.Snapshot
+	dbCold ethdb.Snapshot
 }
 
 // NewSnapshot creates a database snapshot based on the current state.
@@ -433,16 +445,24 @@ type snapshot struct {
 // Note don't forget to release the snapshot once it's used up, otherwise
 // the stale data will never be cleaned up by the underlying compactor.
 func (d *Database) NewSnapshot() (ethdb.Snapshot, error) {
-	snap := d.dbHot.NewSnapshot()
-	return &snapshot{db: snap}, nil
+	snapHot := d.dbHot.NewSnapshot()
+	snapCold, err := d.dbCold.NewSnapshot()
+	if err != nil {
+		return nil, err
+	}
+	return &snapshot{dbHot: snapHot, dbCold: snapCold}, nil
 }
 
 // Has retrieves if a key is present in the snapshot backing by a key-value
 // data store.
 func (snap *snapshot) Has(key []byte) (bool, error) {
-	_, closer, err := snap.db.Get(key)
+	_, closer, err := snap.dbHot.Get(key)
 	if err != nil {
 		if err != pebble.ErrNotFound {
+			_, err = snap.dbCold.Get(key)
+			if err == nil {
+				return true, nil
+			}
 			return false, err
 		} else {
 			return false, nil
@@ -455,8 +475,15 @@ func (snap *snapshot) Has(key []byte) (bool, error) {
 // Get retrieves the given key if it's present in the snapshot backing by
 // key-value data store.
 func (snap *snapshot) Get(key []byte) ([]byte, error) {
-	dat, closer, err := snap.db.Get(key)
+	dat, closer, err := snap.dbHot.Get(key)
 	if err != nil {
+		dat, err = snap.dbCold.Get(key)
+		if err == nil {
+			ret := make([]byte, len(dat))
+			copy(ret, dat)
+			closer.Close()
+			return ret, nil
+		}
 		return nil, err
 	}
 	ret := make([]byte, len(dat))
@@ -468,7 +495,8 @@ func (snap *snapshot) Get(key []byte) ([]byte, error) {
 // Release releases associated resources. Release should always succeed and can
 // be called multiple times without causing error.
 func (snap *snapshot) Release() {
-	snap.db.Close()
+	snap.dbHot.Close()
+	snap.dbCold.Release()
 }
 
 // upperBound returns the upper bound for the given prefix
