@@ -282,22 +282,32 @@ func (d *Database) migration() error {
 		b:  d.dbCold.NewBatch(),
 		db: d,
 	}
+	batch2 := d.dbHot.NewBatch()
+	defer batch2.Close()
 	for {
 		select {
 		case putkeys := <-d.migrationChan:
 			for _, putkey := range *putkeys {
 				batch1.b.Put(0, *putkey.key, *putkey.value)
+				if err := batch2.Delete(*putkey.key, d.writeOptions); err != nil {
+					return err
+				}
 				d.kvCnt.Add(1)
 			}
 			if d.kvCnt.Load() >= 1500 {
 				if err := batch1.b.Write(); err != nil {
-					d.log.Error("Migration failed", "err", err)
+					d.log.Error("ColdDB Put Commit failed", "err", err)
 				}
+				if err := batch2.Commit(d.writeOptions); err != nil {
+					d.log.Error("HotDB Delete Commit failed", "err", err)
+				}
+
 				d.kvCnt.Store(0)
 				batch1 = &coldBatch{
 					b:  d.dbCold.NewBatch(),
 					db: d,
 				}
+				batch2 = d.dbHot.NewBatch()
 			}
 		case <-d.quitChan:
 			return nil
