@@ -22,10 +22,10 @@ import "io"
 // KeyValueReader wraps the Has and Get method of a backing data store.
 type KeyValueReader interface {
 	// Has retrieves if a key is present in the key-value data store.
-	Has(key []byte) (bool, error)
+	Has(idx int, key []byte) (bool, error)
 
 	// Get retrieves the given key if it's present in the key-value data store.
-	Get(key []byte) ([]byte, error)
+	Get(idx int, key []byte) ([]byte, error)
 }
 
 // KeyValueWriter wraps the Put method of a backing data store.

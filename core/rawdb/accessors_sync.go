@@ -25,7 +25,7 @@ import (
 
 // ReadSkeletonSyncStatus retrieves the serialized sync status saved at shutdown.
 func ReadSkeletonSyncStatus(db ethdb.KeyValueReader) []byte {
-	data, _ := db.Get(skeletonSyncStatusKey)
+	data, _ := db.Get(51, skeletonSyncStatusKey)
 	return data
 }
 
@@ -46,7 +46,7 @@ func DeleteSkeletonSyncStatus(db ethdb.KeyValueWriter) {
 
 // ReadSkeletonHeader retrieves a block header from the skeleton sync store,
 func ReadSkeletonHeader(db ethdb.KeyValueReader, number uint64) *types.Header {
-	data, _ := db.Get(skeletonHeaderKey(number))
+	data, _ := db.Get(52, skeletonHeaderKey(number))
 	if len(data) == 0 {
 		return nil
 	}
@@ -85,7 +85,7 @@ const (
 
 // ReadSnapSyncStatusFlag retrieves the state snap sync status flag.
 func ReadSnapSyncStatusFlag(db ethdb.KeyValueReader) uint8 {
-	blob, err := db.Get(snapSyncStatusFlagKey)
+	blob, err := db.Get(53, snapSyncStatusFlagKey)
 	if err != nil || len(blob) != 1 {
 		return StateSyncUnknown
 	}

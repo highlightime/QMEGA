@@ -26,7 +26,7 @@ import (
 
 // ReadSnapshotDisabled retrieves if the snapshot maintenance is disabled.
 func ReadSnapshotDisabled(db ethdb.KeyValueReader) bool {
-	disabled, _ := db.Has(snapshotDisabledKey)
+	disabled, _ := db.Has(4, snapshotDisabledKey)
 	return disabled
 }
 
@@ -47,7 +47,7 @@ func DeleteSnapshotDisabled(db ethdb.KeyValueWriter) {
 // ReadSnapshotRoot retrieves the root of the block whose state is contained in
 // the persisted snapshot.
 func ReadSnapshotRoot(db ethdb.KeyValueReader) common.Hash {
-	data, _ := db.Get(SnapshotRootKey)
+	data, _ := db.Get(38, SnapshotRootKey)
 	if len(data) != common.HashLength {
 		return common.Hash{}
 	}
@@ -74,7 +74,7 @@ func DeleteSnapshotRoot(db ethdb.KeyValueWriter) {
 
 // ReadAccountSnapshot retrieves the snapshot entry of an account trie leaf.
 func ReadAccountSnapshot(db ethdb.KeyValueReader, hash common.Hash) []byte {
-	data, _ := db.Get(accountSnapshotKey(hash))
+	data, _ := db.Get(39, accountSnapshotKey(hash))
 	return data
 }
 
@@ -94,7 +94,7 @@ func DeleteAccountSnapshot(db ethdb.KeyValueWriter, hash common.Hash) {
 
 // ReadStorageSnapshot retrieves the snapshot entry of a storage trie leaf.
 func ReadStorageSnapshot(db ethdb.KeyValueReader, accountHash, storageHash common.Hash) []byte {
-	data, _ := db.Get(storageSnapshotKey(accountHash, storageHash))
+	data, _ := db.Get(40, storageSnapshotKey(accountHash, storageHash))
 	return data
 }
 
@@ -121,7 +121,7 @@ func IterateStorageSnapshots(db ethdb.Iteratee, accountHash common.Hash) ethdb.I
 // ReadSnapshotJournal retrieves the serialized in-memory diff layers saved at
 // the last shutdown. The blob is expected to be max a few 10s of megabytes.
 func ReadSnapshotJournal(db ethdb.KeyValueReader) []byte {
-	data, _ := db.Get(snapshotJournalKey)
+	data, _ := db.Get(41, snapshotJournalKey)
 	return data
 }
 
@@ -144,7 +144,7 @@ func DeleteSnapshotJournal(db ethdb.KeyValueWriter) {
 // ReadSnapshotGenerator retrieves the serialized snapshot generator saved at
 // the last shutdown.
 func ReadSnapshotGenerator(db ethdb.KeyValueReader) []byte {
-	data, _ := db.Get(snapshotGeneratorKey)
+	data, _ := db.Get(42, snapshotGeneratorKey)
 	return data
 }
 
@@ -167,7 +167,7 @@ func DeleteSnapshotGenerator(db ethdb.KeyValueWriter) {
 // ReadSnapshotRecoveryNumber retrieves the block number of the last persisted
 // snapshot layer.
 func ReadSnapshotRecoveryNumber(db ethdb.KeyValueReader) *uint64 {
-	data, _ := db.Get(snapshotRecoveryKey)
+	data, _ := db.Get(43, snapshotRecoveryKey)
 	if len(data) == 0 {
 		return nil
 	}
@@ -198,7 +198,7 @@ func DeleteSnapshotRecoveryNumber(db ethdb.KeyValueWriter) {
 
 // ReadSnapshotSyncStatus retrieves the serialized sync status saved at shutdown.
 func ReadSnapshotSyncStatus(db ethdb.KeyValueReader) []byte {
-	data, _ := db.Get(snapshotSyncStatusKey)
+	data, _ := db.Get(44, snapshotSyncStatusKey)
 	return data
 }
 

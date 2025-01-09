@@ -468,7 +468,7 @@ func dbGet(ctx *cli.Context) error {
 		return err
 	}
 
-	data, err := db.Get(key)
+	data, err := db.Get(1, key)
 	if err != nil {
 		log.Info("Get operation failed", "key", fmt.Sprintf("%#x", key), "error", err)
 		return err
@@ -493,7 +493,7 @@ func dbDelete(ctx *cli.Context) error {
 		log.Info("Could not decode the key", "error", err)
 		return err
 	}
-	data, err := db.Get(key)
+	data, err := db.Get(2, key)
 	if err == nil {
 		fmt.Printf("Previous value: %#x\n", data)
 	}
@@ -531,7 +531,7 @@ func dbPut(ctx *cli.Context) error {
 		log.Info("Could not decode the value", "error", err)
 		return err
 	}
-	data, err = db.Get(key)
+	data, err = db.Get(3, key)
 	if err == nil {
 		fmt.Printf("Previous value: %#x\n", data)
 	}

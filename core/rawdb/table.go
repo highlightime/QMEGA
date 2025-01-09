@@ -41,13 +41,13 @@ func (t *table) Close() error {
 }
 
 // Has retrieves if a prefixed version of a key is present in the database.
-func (t *table) Has(key []byte) (bool, error) {
-	return t.db.Has(append([]byte(t.prefix), key...))
+func (t *table) Has(idx int, key []byte) (bool, error) {
+	return t.db.Has(idx, append([]byte(t.prefix), key...))
 }
 
 // Get retrieves the given prefixed key if it's present in the database.
-func (t *table) Get(key []byte) ([]byte, error) {
-	return t.db.Get(append([]byte(t.prefix), key...))
+func (t *table) Get(idx int, key []byte) ([]byte, error) {
+	return t.db.Get(idx, append([]byte(t.prefix), key...))
 }
 
 // HasAncient is a noop passthrough that just forwards the request to the underlying

@@ -32,14 +32,14 @@ type Database struct {
 	remote *rpc.Client
 }
 
-func (db *Database) Has(key []byte) (bool, error) {
-	if _, err := db.Get(key); err != nil {
+func (db *Database) Has(idx int, key []byte) (bool, error) {
+	if _, err := db.Get(idx, key); err != nil {
 		return false, nil
 	}
 	return true, nil
 }
 
-func (db *Database) Get(key []byte) ([]byte, error) {
+func (db *Database) Get(idx int, key []byte) ([]byte, error) {
 	var resp hexutil.Bytes
 	err := db.remote.Call(&resp, "debug_dbGet", hexutil.Bytes(key))
 	if err != nil {

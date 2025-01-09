@@ -246,6 +246,7 @@ func New(file string, cache int, handles int, namespace string, readonly bool, e
 	db.dbHot = innerDB1
 	// opt2 := opt
 	// opt2.DisableWAL = true
+	// fmt.Println("wal: ", opt.DisableWAL)
 	file2 := "/home/yhseo/nvme/ethereum/execution/data/geth/chaindata/ancient/chain"
 	innerDB2, err := leveldb.New(file2, cache, handles, namespace, readonly)
 	if err != nil {
@@ -286,8 +287,8 @@ func (d *Database) migration() error {
 		select {
 		case putkeys := <-d.migrationChan:
 			for _, putkey := range *putkeys {
-				batch1.PutCold(putkey.key, putkey.value)
-				if err := batch2.Delete(putkey.key, d.writeOptions); err != nil {
+				batch1.PutCold(*putkey.key, *putkey.value)
+				if err := batch2.Delete(*putkey.key, d.writeOptions); err != nil {
 					panic(err)
 					// return err
 				}
@@ -341,15 +342,15 @@ func (d *Database) Close() error {
 }
 
 // Has retrieves if a key is present in the key-value store.
-func (d *Database) Has(key []byte) (bool, error) {
+func (d *Database) Has(idx int, key []byte) (bool, error) {
 	d.quitLock.RLock()
 	defer d.quitLock.RUnlock()
 	if d.closed {
 		return false, pebble.ErrClosed
 	}
 	_, closer, err := d.dbHot.Get(key)
-	if err == pebble.ErrNotFound {
-		_, err = d.dbCold.Get(key)
+	if err == pebble.ErrNotFound && isHasHDD(idx) {
+		_, err = d.dbCold.Get(idx, key)
 		if err == nil {
 			return true, nil
 		}
@@ -362,7 +363,7 @@ func (d *Database) Has(key []byte) (bool, error) {
 }
 
 // Get retrieves the given key if it's present in the key-value store.
-func (d *Database) Get(key []byte) ([]byte, error) {
+func (d *Database) Get(idx int, key []byte) ([]byte, error) {
 	d.quitLock.RLock()
 	defer d.quitLock.RUnlock()
 	if d.closed {
@@ -370,8 +371,8 @@ func (d *Database) Get(key []byte) ([]byte, error) {
 	}
 	dat, closer, err := d.dbHot.Get(key)
 	if err != nil {
-		if err == pebble.ErrNotFound {
-			dat, err = d.dbCold.Get(key)
+		if err == pebble.ErrNotFound && isGetHDD(idx) {
+			dat, err = d.dbCold.Get(idx, key)
 			if err == nil && dat != nil {
 				ret := make([]byte, len(dat))
 				copy(ret, dat)
@@ -395,7 +396,7 @@ func (d *Database) Put(idx int, key []byte, value []byte) error {
 	}
 	res := d.dbHot.Set(key, value, d.writeOptions)
 	if isPutHDD(idx) {
-		d.migrationChan <- &[]*ARYFORMIG{&ARYFORMIG{key: key, value: value}}
+		d.migrationChan <- &[]*ARYFORMIG{&ARYFORMIG{key: &key, value: &value}}
 		// go d.migrationNew(&[]*ARYFORMIG{&ARYFORMIG{key: &key, value: &value}})
 	}
 	return res
@@ -450,11 +451,11 @@ func (d *Database) NewSnapshot() (ethdb.Snapshot, error) {
 
 // Has retrieves if a key is present in the snapshot backing by a key-value
 // data store.
-func (snap *snapshot) Has(key []byte) (bool, error) {
+func (snap *snapshot) Has(idx int, key []byte) (bool, error) {
 	_, closer, err := snap.dbHot.Get(key)
 	if err != nil {
-		if err == pebble.ErrNotFound {
-			_, err = snap.dbCold.Get(key)
+		if err == pebble.ErrNotFound && isHasHDD(idx) {
+			_, err = snap.dbCold.Get(idx, key)
 			if err == nil {
 				return true, nil
 			}
@@ -469,11 +470,11 @@ func (snap *snapshot) Has(key []byte) (bool, error) {
 
 // Get retrieves the given key if it's present in the snapshot backing by
 // key-value data store.
-func (snap *snapshot) Get(key []byte) ([]byte, error) {
+func (snap *snapshot) Get(idx int, key []byte) ([]byte, error) {
 	dat, closer, err := snap.dbHot.Get(key)
 	if err != nil {
-		if err == pebble.ErrNotFound {
-			dat, err = snap.dbCold.Get(key)
+		if err == pebble.ErrNotFound && isGetHDD(idx) {
+			dat, err = snap.dbCold.Get(idx, key)
 			if err == nil {
 				ret := make([]byte, len(dat))
 				copy(ret, dat)
@@ -670,8 +671,8 @@ type coldBatch struct {
 }
 
 type ARYFORMIG struct {
-	key   []byte
-	value []byte
+	key   *[]byte
+	value *[]byte
 }
 
 func isPutHDD(idx int) bool {
@@ -690,10 +691,36 @@ func isPutHDD(idx int) bool {
 	return false
 }
 
+func isGetHDD(idx int) bool {
+	var trieIdx = []int{54, 55, 56}
+	var snapshotIdx = []int{39, 40, 41, 42, 43, 44}
+	for _, i := range trieIdx {
+		if i == idx {
+			return true
+		}
+	}
+	for _, i := range snapshotIdx {
+		if i == idx {
+			return true
+		}
+	}
+	return false
+}
+
+func isHasHDD(idx int) bool {
+	var trieIdx = []int{7, 8, 9}
+	for _, i := range trieIdx {
+		if i == idx {
+			return true
+		}
+	}
+	return false
+}
+
 // Put inserts the given value into the batch for later committing.
 func (b *batch) Put(idx int, key, value []byte) error {
 	if isPutHDD(idx) {
-		b.putkeys = append(b.putkeys, &ARYFORMIG{key: key, value: value})
+		b.putkeys = append(b.putkeys, &ARYFORMIG{key: &key, value: &value})
 	}
 	b.b.Set(key, value, nil)
 	b.size += len(key) + len(value)

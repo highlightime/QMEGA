@@ -84,7 +84,7 @@ func newSnapshot(config *params.CliqueConfig, sigcache *sigLRU, number uint64, h
 
 // loadSnapshot loads an existing snapshot from the database.
 func loadSnapshot(config *params.CliqueConfig, sigcache *sigLRU, db ethdb.Database, hash common.Hash) (*Snapshot, error) {
-	blob, err := db.Get(append(rawdb.CliqueSnapshotPrefix, hash[:]...))
+	blob, err := db.Get(7, append(rawdb.CliqueSnapshotPrefix, hash[:]...))
 	if err != nil {
 		return nil, err
 	}
