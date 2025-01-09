@@ -246,7 +246,6 @@ func New(file string, cache int, handles int, namespace string, readonly bool, e
 	db.dbHot = innerDB1
 	// opt2 := opt
 	// opt2.DisableWAL = true
-	fmt.Println("wal: ", opt.DisableWAL)
 	file2 := "/home/yhseo/nvme/ethereum/execution/data/geth/chaindata/ancient/chain"
 	innerDB2, err := leveldb.New(file2, cache, handles, namespace, readonly)
 	if err != nil {
