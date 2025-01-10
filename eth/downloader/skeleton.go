@@ -618,7 +618,6 @@ func (s *skeleton) saveSyncStatus(db ethdb.KeyValueWriter) {
 
 	if s.progress.Finalized == nil {
 		rawdb.WriteSkeletonSyncStatus(db, status, 0)
-		fmt.Println("finalized is nil")
 		return
 	}
 	rawdb.WriteSkeletonSyncStatus(db, status, int(*s.progress.Finalized))

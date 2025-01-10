@@ -5,6 +5,7 @@
 .PHONY: geth all test lint fmt clean devtools help
 
 GOBIN = ./build/bin
+# GOBIN = ../a_geth_bin
 GO ?= latest
 GORUN = go run
 

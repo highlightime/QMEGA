@@ -103,23 +103,64 @@ type Database struct {
 	skeletonMem       map[string][]byte
 	skeletonMigChan   chan int
 	skeletonMemLock   sync.RWMutex
+	migrationStopped  int
 }
 
 func (d *Database) skeletonMigration() {
 	for {
 		select {
 		case old_finalized := <-d.skeletonMigChan:
+			first := d.migrationStopped == -1
+			fmt.Printf("mig old_finalized: %d\n", old_finalized)
+			putkeys := new([]*ARYFORMIG)
 			for i := old_finalized; i > 1; i-- {
 				key := skeletonHeaderKey(uint64(i))
 				data, closer, err := d.dbHot.Get(key)
 				if err != nil {
 					if err == pebble.ErrNotFound {
+						fmt.Println("mig: ", i, " not found")
+						if first {
+							d.migrationStopped = i
+						}
 						break
 					}
 				}
-				defer closer.Close()
-				d.migrationChan <- &[]*ARYFORMIG{&ARYFORMIG{key: &key, value: &data}}
+				if len(*putkeys) > 1500 {
+					d.migrationChan <- putkeys
+					putkeys = new([]*ARYFORMIG)
+				}
+				dataForSubmission := make([]byte, len(data))
+				copy(dataForSubmission, data)
+				*putkeys = append(*putkeys, &ARYFORMIG{key: &key, value: &dataForSubmission})
+
+				// d.migrationChan <- &[]*ARYFORMIG{&ARYFORMIG{key: &key, value: &data}}
+				closer.Close()
 			}
+
+			for i := d.migrationStopped; i > 1; i-- {
+				key := skeletonHeaderKey(uint64(i))
+				data, closer, err := d.dbHot.Get(key)
+				if err != nil {
+					if err == pebble.ErrNotFound {
+						fmt.Println("mig: ", i, " not found")
+						d.migrationStopped = i
+						break
+					}
+				}
+				// d.migrationChan <- &[]*ARYFORMIG{&ARYFORMIG{key: &key, value: &data}}
+
+				if len(*putkeys) > 1500 {
+					d.migrationChan <- putkeys
+					putkeys = new([]*ARYFORMIG)
+				}
+				dataForSubmission := make([]byte, len(data))
+				copy(dataForSubmission, data)
+				*putkeys = append(*putkeys, &ARYFORMIG{key: &key, value: &dataForSubmission})
+				closer.Close()
+			}
+			fmt.Println("pk: ", len(*putkeys))
+			d.migrationChan <- putkeys
+
 		case <-d.quitChan:
 			return
 		}
@@ -215,12 +256,14 @@ func New(file string, cache int, handles int, namespace string, readonly bool, e
 		memTableSize = maxMemTableSize - 1
 	}
 	db := &Database{
-		fn:            file,
-		log:           logger,
-		quitChan:      make(chan chan error),
-		migrationChan: make(chan *[]*ARYFORMIG, 100000),
-		prefetchChan:  make(chan int, 100000),
-		writeOptions:  &pebble.WriteOptions{Sync: !ephemeral},
+		fn:               file,
+		log:              logger,
+		quitChan:         make(chan chan error),
+		migrationChan:    make(chan *[]*ARYFORMIG, 100000),
+		prefetchChan:     make(chan int, 100000),
+		skeletonMigChan:  make(chan int, 100000),
+		writeOptions:     &pebble.WriteOptions{Sync: !ephemeral},
+		migrationStopped: -1,
 	}
 	opt := &pebble.Options{
 		// Pebble has a single combined cache area and the write
@@ -320,6 +363,9 @@ func (d *Database) migration() error {
 		case putkeys := <-d.migrationChan:
 			for _, putkey := range *putkeys {
 				batch1.PutCold(*putkey.key, *putkey.value)
+				// if (*putkey.key)[0] == []byte("S")[0] {
+				// 	fmt.Printf("migration delete skeleton block %d\n", keySkeletonHeader(*putkey.key))
+				// }
 				if err := batch2.Delete(*putkey.key, d.writeOptions); err != nil {
 					panic(err)
 					// return err
@@ -436,19 +482,19 @@ func (d *Database) Get(idx int, key []byte) ([]byte, error) {
 	if d.closed {
 		return nil, pebble.ErrClosed
 	}
-	if idx > 100 {
-		if idx%100 == 52 {
-			skeleton_idx := idx / 100
-			d.skeletonMemLock.RLock()
-			defer d.skeletonMemLock.RUnlock()
-			if dat, ok := d.skeletonMem[string(skeleton_idx)]; ok {
-				ret := make([]byte, len(dat))
-				copy(ret, dat)
-				// delete(d.skeletonMem, string(skeleton_idx))
-				return ret, nil
-			}
-		}
-	}
+	// if idx > 100 {
+	// 	if idx%100 == 52 {
+	// 		skeleton_idx := idx / 100
+	// 		d.skeletonMemLock.RLock()
+	// 		defer d.skeletonMemLock.RUnlock()
+	// 		if dat, ok := d.skeletonMem[string(skeleton_idx)]; ok {
+	// 			ret := make([]byte, len(dat))
+	// 			copy(ret, dat)
+	// 			// delete(d.skeletonMem, string(skeleton_idx))
+	// 			return ret, nil
+	// 		}
+	// 	}
+	// }
 
 	dat, closer, err := d.dbHot.Get(key)
 	if err != nil {
@@ -491,19 +537,14 @@ func (d *Database) Put(idx int, key []byte, value []byte) error {
 	}
 	res := d.dbHot.Set(key, value, d.writeOptions)
 	if isPutHDD(idx) {
-		idx = idx % 100
-		switch idx {
-		case 37:
-			skeleton_idx := idx / 100
-			old_finalized := d.skeletonFinalized.Load()
-			if d.skeletonFinalized.CompareAndSwap(old_finalized, int64(skeleton_idx)) {
-				d.skeletonMigChan <- int(old_finalized)
-			}
-			break
-		case 38:
-			break
-		default:
-			d.migrationChan <- &[]*ARYFORMIG{&ARYFORMIG{key: &key, value: &value}}
+		d.migrationChan <- &[]*ARYFORMIG{&ARYFORMIG{key: &key, value: &value}}
+	}
+	if idx%100 == 37 {
+		skeleton_idx := idx / 100
+		old_finalized := d.skeletonFinalized.Load()
+		if old_finalized < int64(skeleton_idx) && d.skeletonFinalized.CompareAndSwap(old_finalized, int64(skeleton_idx)) {
+			fmt.Printf("put old_finalized: %d skidx: %d\n", old_finalized, skeleton_idx)
+			d.skeletonMigChan <- int(skeleton_idx) - 1
 		}
 	}
 	return res
@@ -785,7 +826,7 @@ type ARYFORMIG struct {
 func isPutHDD(idx int) bool {
 	var trieIdx = []int{40, 41, 42}
 	var snapshotIdx = []int{27, 28, 29, 30, 31, 32}
-	var skeleton int = 38
+	// var skeleton int = 38
 	if idx-100 >= 0 {
 		idx = idx % 100
 		skeleton_idx := idx / 100
@@ -803,13 +844,22 @@ func isPutHDD(idx int) bool {
 			return true
 		}
 	}
-	return idx == skeleton
+	return false
+	// return idx == skeleton
 }
 
 func encodeBlockNumber(number uint64) []byte {
 	enc := make([]byte, 8)
 	binary.BigEndian.PutUint64(enc, number)
 	return enc
+}
+
+func decodeBlockNumber(enc []byte) uint64 {
+	return binary.BigEndian.Uint64(enc)
+}
+
+func keySkeletonHeader(key []byte) uint64 {
+	return decodeBlockNumber(key[1:])
 }
 
 func skeletonHeaderKey(number uint64) []byte {
@@ -837,7 +887,8 @@ func isGetHDD(idx int) bool {
 			return true
 		}
 	}
-	return idx == skeleton
+	return idx%100 == skeleton
+	// return idx == skeleton
 }
 
 func isHasHDD(idx int) bool {
@@ -853,19 +904,14 @@ func isHasHDD(idx int) bool {
 // Put inserts the given value into the batch for later committing.
 func (b *batch) Put(idx int, key, value []byte) error {
 	if isPutHDD(idx) {
-		idx = idx % 100
-		switch idx {
-		case 37:
-			skeleton_idx := idx / 100
-			old_finalized := b.db.skeletonFinalized.Load()
-			if b.db.skeletonFinalized.CompareAndSwap(old_finalized, int64(skeleton_idx)) {
-				b.db.skeletonMigChan <- int(old_finalized)
-			}
-			break
-		case 38:
-			break
-		default:
-			b.putkeys = append(b.putkeys, &ARYFORMIG{key: &key, value: &value})
+		b.putkeys = append(b.putkeys, &ARYFORMIG{key: &key, value: &value})
+	}
+	if idx%100 == 37 {
+		skeleton_idx := idx / 100
+		old_finalized := b.db.skeletonFinalized.Load()
+		if old_finalized < int64(skeleton_idx) && b.db.skeletonFinalized.CompareAndSwap(old_finalized, int64(skeleton_idx)) {
+			fmt.Printf("put old_finalized: %d skidx: %d\n", old_finalized, skeleton_idx)
+			b.db.skeletonMigChan <- int(skeleton_idx) - 1
 		}
 	}
 	b.b.Set(key, value, nil)
