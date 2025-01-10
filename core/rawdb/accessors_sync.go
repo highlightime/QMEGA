@@ -17,6 +17,8 @@
 package rawdb
 
 import (
+	"fmt"
+
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/ethdb"
 	"github.com/ethereum/go-ethereum/log"
@@ -30,8 +32,8 @@ func ReadSkeletonSyncStatus(db ethdb.KeyValueReader) []byte {
 }
 
 // WriteSkeletonSyncStatus stores the serialized sync status to save at shutdown.
-func WriteSkeletonSyncStatus(db ethdb.KeyValueWriter, status []byte) {
-	if err := db.Put(37, skeletonSyncStatusKey, status); err != nil {
+func WriteSkeletonSyncStatus(db ethdb.KeyValueWriter, status []byte, finalized int) {
+	if err := db.Put(37+finalized*100, skeletonSyncStatusKey, status); err != nil {
 		log.Crit("Failed to store skeleton sync status", "err", err)
 	}
 }
@@ -45,8 +47,9 @@ func DeleteSkeletonSyncStatus(db ethdb.KeyValueWriter) {
 }
 
 // ReadSkeletonHeader retrieves a block header from the skeleton sync store,
-func ReadSkeletonHeader(db ethdb.KeyValueReader, number uint64) *types.Header {
-	data, _ := db.Get(52, skeletonHeaderKey(number))
+func ReadSkeletonHeader(idx int, db ethdb.KeyValueReader, number uint64) *types.Header {
+	fmt.Printf("rs: %d i: %d\n", number, idx)
+	data, _ := db.Get(52+100*int(number), skeletonHeaderKey(number))
 	if len(data) == 0 {
 		return nil
 	}
@@ -61,11 +64,12 @@ func ReadSkeletonHeader(db ethdb.KeyValueReader, number uint64) *types.Header {
 // WriteSkeletonHeader stores a block header into the skeleton sync store.
 func WriteSkeletonHeader(db ethdb.KeyValueWriter, header *types.Header) {
 	data, err := rlp.EncodeToBytes(header)
+	skeleton_idx := int(header.Number.Uint64())
 	if err != nil {
 		log.Crit("Failed to RLP encode header", "err", err)
 	}
 	key := skeletonHeaderKey(header.Number.Uint64())
-	if err := db.Put(38, key, data); err != nil {
+	if err := db.Put(38+skeleton_idx*100, key, data); err != nil {
 		log.Crit("Failed to store skeleton header", "err", err)
 	}
 }
