@@ -247,7 +247,7 @@ func (d *Downloader) findBeaconAncestor() (uint64, error) {
 		// Split our chain interval in two, and request the hash to cross check
 		check := (start + end) / 2
 
-		h := d.skeleton.Header(check)
+		h := d.skeleton.Header(1, check)
 		n := h.Number.Uint64()
 
 		var known bool
@@ -309,7 +309,7 @@ func (d *Downloader) fetchHeaders(from uint64) error {
 				number := head.Number.Uint64() - uint64(fsMinFullBlocks)
 
 				log.Warn("Pivot seemingly stale, moving", "old", d.pivotHeader.Number, "new", number)
-				if d.pivotHeader = d.skeleton.Header(number); d.pivotHeader == nil {
+				if d.pivotHeader = d.skeleton.Header(2, number); d.pivotHeader == nil {
 					if number < tail.Number.Uint64() {
 						dist := tail.Number.Uint64() - number
 						if len(localHeaders) >= int(dist) {
@@ -340,7 +340,7 @@ func (d *Downloader) fetchHeaders(from uint64) error {
 			hashes  = make([]common.Hash, 0, maxHeadersProcess)
 		)
 		for i := 0; i < maxHeadersProcess && from <= head.Number.Uint64(); i++ {
-			header := d.skeleton.Header(from)
+			header := d.skeleton.Header(3, from)
 
 			// The header is not found in skeleton space, try to find it in local chain.
 			if header == nil && from < tail.Number.Uint64() {

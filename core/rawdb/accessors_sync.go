@@ -68,6 +68,7 @@ func WriteSkeletonHeader(db ethdb.KeyValueWriter, header *types.Header) {
 	if err != nil {
 		log.Crit("Failed to RLP encode header", "err", err)
 	}
+	// fmt.Printf("sk: %d\n", len(data))
 	key := skeletonHeaderKey(header.Number.Uint64())
 	if err := db.Put(38+skeleton_idx*100, key, data); err != nil {
 		log.Crit("Failed to store skeleton header", "err", err)

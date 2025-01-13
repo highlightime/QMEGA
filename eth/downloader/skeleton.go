@@ -1258,6 +1258,7 @@ func (s *skeleton) Bounds() (head *types.Header, tail *types.Header, final *type
 //
 // Note, outside the permitted runtimes, this method might return nil results and
 // subsequent calls might return headers from different chains.
-func (s *skeleton) Header(number uint64) *types.Header {
+func (s *skeleton) Header(idx int, number uint64) *types.Header {
+	// fmt.Printf("i: %d bk: %d\n", idx, number)
 	return rawdb.ReadSkeletonHeader(12, s.db, number)
 }

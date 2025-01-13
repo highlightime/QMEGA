@@ -411,7 +411,7 @@ func (d *Downloader) syncToHead() (err error) {
 
 		// Retrieve the pivot header from the skeleton chain segment but
 		// fallback to local chain if it's not found in skeleton space.
-		if pivot = d.skeleton.Header(number); pivot == nil {
+		if pivot = d.skeleton.Header(4, number); pivot == nil {
 			_, oldest, _, _ := d.skeleton.Bounds() // error is already checked
 			if number < oldest.Number.Uint64() {
 				count := int(oldest.Number.Uint64() - number) // it's capped by fsMinFullBlocks

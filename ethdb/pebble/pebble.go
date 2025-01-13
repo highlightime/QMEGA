@@ -21,6 +21,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
+	"os"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -51,6 +52,17 @@ const (
 	// degradationWarnInterval specifies how often warning should be printed if the
 	// leveldb database cannot keep up with requested writes.
 	degradationWarnInterval = time.Minute
+
+	fileNameForSkeleton = "/home/yhseo/nvme/ethereum/execution/data/geth/chaindata/ancient/chain/skeleton.txt"
+	// fileNameForSkeleton = "/home/yhseo/nvme/ethereum/execution/data/geth/chaindata/ancient/skeleton.txt"
+	prefetchNum = 1000
+
+	hddPath            = "/home/yhseo/nvme/ethereum/execution/data/geth/chaindata/ancient/chain"
+	skeletonMaxLen     = 1016
+	onDiskSkeletonSize = skeletonMaxLen + 8
+	commitThreshold    = 100000
+	migrationThreshold = 10000
+	deleteBatchSize    = 1000
 )
 
 // Database is a persistent key-value store based on the pebble storage engine.
@@ -98,12 +110,99 @@ type Database struct {
 
 	writeOptions *pebble.WriteOptions
 
-	skeletonFinalized atomic.Int64
-	prefetchChan      chan int
-	skeletonMem       map[string][]byte
-	skeletonMigChan   chan int
-	skeletonMemLock   sync.RWMutex
-	migrationStopped  int
+	skeletonFinalized  atomic.Int64
+	prefetchChan       chan int
+	skeletonMem        map[string][]byte
+	skeletonMigChan    chan int
+	skeletonMemLock    sync.RWMutex
+	migrationStopped   int
+	fileForSkeleton    *os.File
+	deleteSkeletonChan chan int
+}
+
+type onDiskSkeletonHeader struct {
+	DataLen uint64
+	Data    [skeletonMaxLen]byte
+}
+
+type ARYFORFILE struct {
+	index int64
+	value []byte
+}
+
+func (d *Database) deleteSkeletonHeaderInMem() {
+	var batch []int
+
+	for {
+		select {
+		case skeleton_idx := <-d.deleteSkeletonChan:
+			batch = append(batch, skeleton_idx)
+			if len(batch) >= deleteBatchSize {
+				d.deleteBatch(batch)
+				batch = nil
+			}
+		case <-d.quitChan:
+			if len(batch) > 0 {
+				d.deleteBatch(batch)
+			}
+			return
+		}
+	}
+}
+
+func (d *Database) deleteBatch(batch []int) {
+	d.skeletonMemLock.Lock()
+	defer d.skeletonMemLock.Unlock()
+
+	for _, skeleton_idx := range batch {
+		delete(d.skeletonMem, string(skeletonHeaderKey(uint64(skeleton_idx))))
+	}
+}
+
+func (d *Database) WriteSkeletonHeaderToFile(ary *[]*ARYFORFILE) {
+	for _, putkey := range *ary {
+		var mystruct onDiskSkeletonHeader
+		mystruct.DataLen = uint64(len(putkey.value))
+		if len(putkey.value) > 1016 {
+			fmt.Println("dataLen: ", len(putkey.value))
+		}
+		copy(mystruct.Data[:], putkey.value)
+		_, err := d.fileForSkeleton.Seek(onDiskSkeletonSize*putkey.index, 0)
+		if err != nil {
+			fmt.Printf("Failed to seek: %v\n", err)
+			d.fileForSkeleton.Sync()
+			return
+		}
+		err = binary.Write(d.fileForSkeleton, binary.LittleEndian, &mystruct)
+		if err != nil {
+			fmt.Printf("Failed to write to file: %v\n", err)
+			d.fileForSkeleton.Sync()
+			return
+		}
+	}
+	d.fileForSkeleton.Sync()
+	batchHot := d.dbHot.NewBatch()
+	for _, putkey := range *ary {
+		key := skeletonHeaderKey(uint64(putkey.index))
+		batchHot.Delete(key, d.writeOptions)
+	}
+	if err := batchHot.Commit(d.writeOptions); err != nil {
+		d.log.Error("HotDB Delete Commit failed", "err", err)
+	}
+}
+
+func (d *Database) processKV(idx int) (*ARYFORFILE, error) {
+	key := skeletonHeaderKey(uint64(idx))
+	data, closer, err := d.dbHot.Get(key)
+	if err != nil {
+		return nil, err
+	}
+	ret := new(ARYFORFILE)
+	ret.value = make([]byte, len(data))
+	copy(ret.value, data)
+	ret.index = int64(idx)
+	closer.Close()
+	return ret, nil
 }
 
 func (d *Database) skeletonMigration() {
@@ -112,55 +211,49 @@ func (d *Database) skeletonMigration() {
 		case old_finalized := <-d.skeletonMigChan:
 			first := d.migrationStopped == -1
 			fmt.Printf("mig old_finalized: %d\n", old_finalized)
-			putkeys := new([]*ARYFORMIG)
-			for i := old_finalized; i > 1; i-- {
-				key := skeletonHeaderKey(uint64(i))
-				data, closer, err := d.dbHot.Get(key)
+			putkeys := new([]*ARYFORFILE)
+			for i := old_finalized; i > prefetchNum; i-- {
+				entry, err := d.processKV(i)
 				if err != nil {
 					if err == pebble.ErrNotFound {
 						fmt.Println("mig: ", i, " not found")
 						if first {
 							d.migrationStopped = i
 						}
-						break
+					}
+					break
+				} else {
+					*putkeys = append(*putkeys, entry)
+					if len(*putkeys) > commitThreshold {
+						fmt.Println("mig: ", i)
+						d.WriteSkeletonHeaderToFile(putkeys)
+						putkeys = new([]*ARYFORFILE)
 					}
 				}
-				if len(*putkeys) > 1500 {
-					d.migrationChan <- putkeys
-					putkeys = new([]*ARYFORMIG)
-				}
-				dataForSubmission := make([]byte, len(data))
-				copy(dataForSubmission, data)
-				*putkeys = append(*putkeys, &ARYFORMIG{key: &key, value: &dataForSubmission})
-
-				// d.migrationChan <- &[]*ARYFORMIG{&ARYFORMIG{key: &key, value: &data}}
-				closer.Close()
 			}
 
-			for i := d.migrationStopped; i > 1; i-- {
-				key := skeletonHeaderKey(uint64(i))
-				data, closer, err := d.dbHot.Get(key)
+			for i := d.migrationStopped; i > prefetchNum; i-- {
+				entry, err := d.processKV(i)
 				if err != nil {
 					if err == pebble.ErrNotFound {
 						fmt.Println("mig: ", i, " not found")
 						d.migrationStopped = i
-						break
+					}
+					break
+				} else {
+					*putkeys = append(*putkeys, entry)
+					if len(*putkeys) > commitThreshold {
+						fmt.Println("mig: ", i)
+						d.WriteSkeletonHeaderToFile(putkeys)
+						putkeys = new([]*ARYFORFILE)
 					}
 				}
-				// d.migrationChan <- &[]*ARYFORMIG{&ARYFORMIG{key: &key, value: &data}}
-
-				if len(*putkeys) > 1500 {
-					d.migrationChan <- putkeys
-					putkeys = new([]*ARYFORMIG)
-				}
-				dataForSubmission := make([]byte, len(data))
-				copy(dataForSubmission, data)
-				*putkeys = append(*putkeys, &ARYFORMIG{key: &key, value: &dataForSubmission})
-				closer.Close()
 			}
 			fmt.Println("pk: ", len(*putkeys))
-			d.migrationChan <- putkeys
 
+			if len(*putkeys) > 0 {
+				d.WriteSkeletonHeaderToFile(putkeys)
+			}
 		case <-d.quitChan:
 			return
 		}
@@ -256,14 +349,15 @@ func New(file string, cache int, handles int, namespace string, readonly bool, e
 		memTableSize = maxMemTableSize - 1
 	}
 	db := &Database{
-		fn:               file,
-		log:              logger,
-		quitChan:         make(chan chan error),
-		migrationChan:    make(chan *[]*ARYFORMIG, 100000),
-		prefetchChan:     make(chan int, 100000),
-		skeletonMigChan:  make(chan int, 100000),
-		writeOptions:     &pebble.WriteOptions{Sync: !ephemeral},
-		migrationStopped: -1,
+		fn:                 file,
+		log:                logger,
+		quitChan:           make(chan chan error),
+		migrationChan:      make(chan *[]*ARYFORMIG, 100000),
+		prefetchChan:       make(chan int, 100000),
+		skeletonMigChan:    make(chan int, 100000),
+		deleteSkeletonChan: make(chan int, 100000),
+		writeOptions:       &pebble.WriteOptions{Sync: !ephemeral},
+		migrationStopped:   -1,
 	}
 	opt := &pebble.Options{
 		// Pebble has a single combined cache area and the write
@@ -320,12 +414,19 @@ func New(file string, cache int, handles int, namespace string, readonly bool, e
 	// opt2 := opt
 	// opt2.DisableWAL = true
 	// fmt.Println("wal: ", opt.DisableWAL)
-	file2 := "/home/yhseo/nvme/ethereum/execution/data/geth/chaindata/ancient/chain"
-	innerDB2, err := leveldb.New(file2, cache, handles, namespace, readonly)
+	innerDB2, err := leveldb.New(hddPath, cache, handles, namespace, readonly)
 	if err != nil {
 		return nil, err
 	}
 	db.dbCold = innerDB2
+
+	fileForSkeleton, err := os.Create(fileNameForSkeleton)
+	if err != nil {
+		fmt.Printf("Failed to create file: %v\n", err)
+	}
+	db.fileForSkeleton = fileForSkeleton
+
+	db.skeletonMem = make(map[string][]byte)
 
 	db.compTimeMeter = metrics.GetOrRegisterMeter(namespace+"compact/time", nil)
 	db.compReadMeter = metrics.GetOrRegisterMeter(namespace+"compact/input", nil)
@@ -346,8 +447,9 @@ func New(file string, cache int, handles int, namespace string, readonly bool, e
 	// Start up the metrics gathering and return
 	go db.meter(metricsGatheringInterval, namespace)
 	go db.migration()
-	// go db.prefetchSkeletonHeader()
+	go db.prefetchSkeletonHeader()
 	go db.skeletonMigration()
+	go db.deleteSkeletonHeaderInMem()
 	return db, nil
 }
 
@@ -363,17 +465,13 @@ func (d *Database) migration() error {
 		case putkeys := <-d.migrationChan:
 			for _, putkey := range *putkeys {
 				batch1.PutCold(*putkey.key, *putkey.value)
-				// if (*putkey.key)[0] == []byte("S")[0] {
-				// 	fmt.Printf("migration delete skeleton block %d\n", keySkeletonHeader(*putkey.key))
-				// }
 				if err := batch2.Delete(*putkey.key, d.writeOptions); err != nil {
 					panic(err)
-					// return err
 				}
 			}
 			d.kvCnt.Add(int64(len(*putkeys)))
 
-			if d.kvCnt.Load() >= 1500 {
+			if d.kvCnt.Load() >= migrationThreshold {
 				d.kvCnt.Store(0)
 				if err := batch1.b.Write(); err != nil {
 					d.log.Error("ColdDB Put Commit failed", "err", err)
@@ -440,40 +538,81 @@ func (d *Database) Has(idx int, key []byte) (bool, error) {
 	return true, nil
 }
 
-var prefetchNum int = 1000
+func (d *Database) prefetchSkeletonHeader() {
+	for {
+		select {
+		case skeleton_idx := <-d.prefetchChan:
+			var localSkeleton map[string][]byte = make(map[string][]byte)
+			// End := prefetchNum + skeleton_idx
+			skeletonFinalized := int(d.skeletonFinalized.Load())
+			// if End > skeletonFinalized {
+			End := skeletonFinalized
+			// }
+			file, err := os.Open(fileNameForSkeleton)
+			if err != nil {
+				fmt.Printf("Failed to open file: %v\n", err)
+			}
+			defer file.Close()
 
-// func (d *Database) prefetchSkeletonHeader() {
-// 	for {
-// 		select {
-// 		case skeleton_idx := <-d.prefetchChan:
-// 			var localSkeleton map[string][]byte = make(map[string][]byte)
-// 			for i := skeleton_idx; i < skeleton_idx+prefetchNum; i++ {
-// 				key := skeletonHeaderKey(uint64(i))
-// 				dat, closer, err := d.dbHot.Get(key)
-// 				if err == pebble.ErrNotFound {
-// 					dat, err = d.dbCold.Get(52, key)
-// 				}
-// 				if err != nil {
-// 					d.log.Error("Prefetch failed", "err", err)
-// 				}
-// 				localSkeleton[string(key)] = dat
-// 				defer closer.Close()
-// 			}
+			for i := skeleton_idx; i < End; i++ {
+				key := skeletonHeaderKey(uint64(i))
+				dat, closer, err := d.dbHot.Get(key)
+				if closer != nil {
+					defer closer.Close()
+				}
+				if err == pebble.ErrNotFound {
+					dat, err := ReadSkeletonToFile(i, file)
+					if err != nil {
+						fmt.Printf("Failed to read from file: %v\n", err)
+					} else {
+						ret := make([]byte, len(dat))
+						copy(ret, dat)
+						localSkeleton[string(key)] = ret
+					}
+				} else if err != nil {
+					fmt.Println("pebble db prefetch error")
+				} else {
+					ret := make([]byte, len(dat))
+					copy(ret, dat)
+					localSkeleton[string(key)] = ret
+				}
+				if len(localSkeleton) > prefetchNum {
+					fmt.Println("prefetch: ", i)
+					d.skeletonMemLock.Lock()
+					for key, value := range localSkeleton {
+						d.skeletonMem[key] = value
+					}
+					d.skeletonMemLock.Unlock()
+					localSkeleton = make(map[string][]byte)
+				}
+			}
+		case <-d.quitChan:
+			return
+		}
+	}
+}
 
-// 			d.skeletonMemLock.Lock()
-// 			for key := range localSkeleton {
-// 				d.skeletonMem[key] = localSkeleton[key]
-// 			}
-// 			for i := skeleton_idx - 1; i > skeleton_idx-prefetchNum-1; i-- {
-// 				key := skeletonHeaderKey(uint64(i))
-// 				delete(d.skeletonMem, string(key))
-// 			}
-// 			d.skeletonMemLock.Unlock()
-// 		case <-d.quitChan:
-// 			return
-// 		}
-// 	}
-// }
+func ReadSkeletonToFile(i int, file *os.File) ([]byte, error) {
+	_, err := file.Seek(onDiskSkeletonSize*int64(i), 0)
+	if err != nil {
+		fmt.Printf("Failed to seek: %v\n", err)
+		return nil, err
+	}
+	var mystruct onDiskSkeletonHeader
+	err = binary.Read(file, binary.LittleEndian, &mystruct)
+	if err != nil {
+		fmt.Printf("Failed to read from file: %v\n", err)
+		return nil, err
+	}
+	if mystruct.DataLen == 0 {
+		fmt.Println("dataLen is 0")
+		temp := make([]byte, 0)
+		return temp, nil
+	}
+	ret := make([]byte, mystruct.DataLen)
+	copy(ret, mystruct.Data[:mystruct.DataLen-1])
+	return ret, nil
+}
 
 // Get retrieves the given key if it's present in the key-value store.
 func (d *Database) Get(idx int, key []byte) ([]byte, error) {
@@ -482,35 +621,51 @@ func (d *Database) Get(idx int, key []byte) ([]byte, error) {
 	if d.closed {
 		return nil, pebble.ErrClosed
 	}
-	// if idx > 100 {
-	// 	if idx%100 == 52 {
-	// 		skeleton_idx := idx / 100
-	// 		d.skeletonMemLock.RLock()
-	// 		defer d.skeletonMemLock.RUnlock()
-	// 		if dat, ok := d.skeletonMem[string(skeleton_idx)]; ok {
-	// 			ret := make([]byte, len(dat))
-	// 			copy(ret, dat)
-	// 			// delete(d.skeletonMem, string(skeleton_idx))
-	// 			return ret, nil
-	// 		}
-	// 	}
-	// }
+	skeleton_idx := idx / 100
+
+	if idx > 100 {
+		if (skeleton_idx)%prefetchNum == 1 {
+			d.prefetchChan <- skeleton_idx + prefetchNum
+		}
+		if idx%100 == 52 {
+			d.skeletonMemLock.RLock()
+			defer d.skeletonMemLock.RUnlock()
+			key := skeletonHeaderKey(uint64(skeleton_idx))
+			if dat, ok := d.skeletonMem[string(key)]; ok {
+				ret := make([]byte, len(dat))
+				copy(ret, dat)
+				fmt.Println("idx: ", skeleton_idx, "ret: ", len(ret))
+				if skeleton_idx <= int(d.skeletonFinalized.Load()) {
+					d.deleteSkeletonChan <- skeleton_idx
+				}
+				// delete(d.skeletonMem, string(skeleton_idx))
+				return ret, nil
+			}
+		}
+	}
 
 	dat, closer, err := d.dbHot.Get(key)
 	if err != nil {
 		if idx%100 == 52 {
-			fmt.Println("Miss in Hot DB")
+			fmt.Println("key miss: ", skeleton_idx)
 		}
 		if err == pebble.ErrNotFound && isGetHDD(idx) {
-			// if idx-100 >= 0 {
-			// 	idx = idx % 100
-			// 	if idx == 52 {
-			// 		skeleton_idx := idx / 100
-			// 		d.prefetchChan <- skeleton_idx
-			// 	}
-			// }
-
-			dat, err = d.dbCold.Get(idx, key)
+			if idx%100 == 52 {
+				file, err := os.Open(fileNameForSkeleton)
+				if err != nil {
+					fmt.Printf("Failed to open file: %v\n", err)
+				} else {
+					dat, err = ReadSkeletonToFile(skeleton_idx, file)
+					if err != nil {
+						fmt.Printf("Failed to read from file: %v\n", err)
+					} else {
+						err = nil
+					}
+					defer file.Close()
+				}
+			} else {
+				dat, err = d.dbCold.Get(idx, key)
+			}
 			if err == nil && dat != nil {
 				ret := make([]byte, len(dat))
 				copy(ret, dat)
@@ -518,9 +673,6 @@ func (d *Database) Get(idx int, key []byte) ([]byte, error) {
 			}
 		}
 		return nil, err
-	}
-	if idx%100 == 52 {
-		fmt.Println("Hit in Hot DB")
 	}
 	ret := make([]byte, len(dat))
 	copy(ret, dat)
@@ -530,24 +682,30 @@ func (d *Database) Get(idx int, key []byte) ([]byte, error) {
 
 // Put inserts the given value into the key-value store.
 func (d *Database) Put(idx int, key []byte, value []byte) error {
-	d.quitLock.RLock()
-	defer d.quitLock.RUnlock()
-	if d.closed {
-		return pebble.ErrClosed
-	}
-	res := d.dbHot.Set(key, value, d.writeOptions)
-	if isPutHDD(idx) {
-		d.migrationChan <- &[]*ARYFORMIG{&ARYFORMIG{key: &key, value: &value}}
-	}
-	if idx%100 == 37 {
-		skeleton_idx := idx / 100
-		old_finalized := d.skeletonFinalized.Load()
-		if old_finalized < int64(skeleton_idx) && d.skeletonFinalized.CompareAndSwap(old_finalized, int64(skeleton_idx)) {
-			fmt.Printf("put old_finalized: %d skidx: %d\n", old_finalized, skeleton_idx)
-			d.skeletonMigChan <- int(skeleton_idx) - 1
-		}
-	}
-	return res
+	// d.quitLock.RLock()
+	// defer d.quitLock.RUnlock()
+	// if d.closed {
+	// 	return pebble.ErrClosed
+	// }
+	// res := d.dbHot.Set(key, value, d.writeOptions)
+	// if isPutHDD(idx) {
+	// 	d.migrationChan <- &[]*ARYFORMIG{&ARYFORMIG{key: &key, value: &value}}
+	// }
+	// if idx%100 == 37 {
+	// 	skeleton_idx := idx / 100
+	// 	old_finalized := d.skeletonFinalized.Load()
+	// 	if old_finalized < int64(skeleton_idx) && d.skeletonFinalized.CompareAndSwap(old_finalized, int64(skeleton_idx)) {
+	// 		fmt.Printf("put old_finalized: %d skidx: %d\n", old_finalized, skeleton_idx)
+	// 		d.skeletonMigChan <- int(skeleton_idx) - 1
+	// 	}
+	// }
+	// if idx%100 == 38 {
+	// 	fmt.Println("put skeleton: ", len(value), idx/100)
+	// }
+	batch := d.NewBatch()
+	batch.Put(idx, key, value)
+	err := batch.Write()
+	return err
 }
 
 // Delete removes the key from the key-value store.
@@ -810,7 +968,14 @@ type batch struct {
 	b       *pebble.Batch
 	db      *Database
 	putkeys []*ARYFORMIG
+	skkeys  []*ARYFORSK
 	size    int
+}
+
+type ARYFORSK struct {
+	key   *[]byte
+	value *[]byte
+	idx   int
 }
 
 type coldBatch struct {
@@ -858,9 +1023,9 @@ func decodeBlockNumber(enc []byte) uint64 {
 	return binary.BigEndian.Uint64(enc)
 }
 
-func keySkeletonHeader(key []byte) uint64 {
-	return decodeBlockNumber(key[1:])
-}
+// func keySkeletonHeader(key []byte) uint64 {
+// 	return decodeBlockNumber(key[1:])
+// }
 
 func skeletonHeaderKey(number uint64) []byte {
 	return append([]byte("S"), encodeBlockNumber(number)...)
@@ -906,13 +1071,10 @@ func (b *batch) Put(idx int, key, value []byte) error {
 	if isPutHDD(idx) {
 		b.putkeys = append(b.putkeys, &ARYFORMIG{key: &key, value: &value})
 	}
-	if idx%100 == 37 {
-		skeleton_idx := idx / 100
-		old_finalized := b.db.skeletonFinalized.Load()
-		if old_finalized < int64(skeleton_idx) && b.db.skeletonFinalized.CompareAndSwap(old_finalized, int64(skeleton_idx)) {
-			fmt.Printf("put old_finalized: %d skidx: %d\n", old_finalized, skeleton_idx)
-			b.db.skeletonMigChan <- int(skeleton_idx) - 1
-		}
+
+	if idx%100 == 38 || idx%100 == 37 {
+		// fmt.Println("bput skeleton: ", len(value), idx/100)
+		b.skkeys = append(b.skkeys, &ARYFORSK{key: &key, value: &value, idx: idx})
 	}
 	b.b.Set(key, value, nil)
 	b.size += len(key) + len(value)
@@ -942,6 +1104,22 @@ func (b *batch) Write() error {
 	if len(b.putkeys) > 0 {
 		b.db.migrationChan <- &b.putkeys
 		// go b.db.migrationNew(&b.putkeys)
+	}
+
+	if len(b.skkeys) > 0 {
+		for _, putkey := range b.skkeys {
+			idx := putkey.idx
+			if idx%100 == 37 {
+				skeleton_idx := idx / 100
+				old_finalized := b.db.skeletonFinalized.Load()
+				if old_finalized < int64(skeleton_idx) && b.db.skeletonFinalized.CompareAndSwap(old_finalized, int64(skeleton_idx)) {
+					b.db.skeletonMigChan <- int(skeleton_idx) - 1
+				}
+			}
+			// else if idx%100 == 38 {
+			// 	fmt.Println("put skeleton: ", len(*putkey.value), idx/100)
+			// }
+		}
 	}
 
 	return res
