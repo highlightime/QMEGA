@@ -55,14 +55,14 @@ const (
 
 	fileNameForSkeleton = "/home/yhseo/nvme/ethereum/execution/data/geth/chaindata/ancient/chain/skeleton.txt"
 	// fileNameForSkeleton = "/home/yhseo/nvme/ethereum/execution/data/geth/chaindata/ancient/skeleton.txt"
-	prefetchNum = 1000
+	prefetchNum = 100000
 
-	hddPath            = "/home/yhseo/nvme/ethereum/execution/data/geth/chaindata/ancient/chain"
-	skeletonMaxLen     = 1016
-	onDiskSkeletonSize = skeletonMaxLen + 8
-	commitThreshold    = 100000
-	migrationThreshold = 10000
-	deleteBatchSize    = 1000
+	hddPath                    = "/home/yhseo/nvme/ethereum/execution/data/geth/chaindata/ancient/chain"
+	skeletonMaxLen             = 1016
+	onDiskSkeletonSize         = skeletonMaxLen + 8
+	migrationSkeletonBatchSize = 100000
+	migrationBatchSize         = 10000
+	deleteBatchSize            = 1000
 )
 
 // Database is a persistent key-value store based on the pebble storage engine.
@@ -139,6 +139,7 @@ func (d *Database) deleteSkeletonHeaderInMem() {
 			batch = append(batch, skeleton_idx)
 			if len(batch) >= deleteBatchSize {
 				d.deleteBatch(batch)
+				fmt.Println("delete start: ", batch[0], "end: ", batch[len(batch)-1])
 				batch = nil
 			}
 		case <-d.quitChan:
@@ -170,24 +171,13 @@ func (d *Database) WriteSkeletonHeaderToFile(ary *[]*ARYFORFILE) {
 		_, err := d.fileForSkeleton.Seek(onDiskSkeletonSize*putkey.index, 0)
 		if err != nil {
 			fmt.Printf("Failed to seek: %v\n", err)
-			d.fileForSkeleton.Sync()
 			return
 		}
 		err = binary.Write(d.fileForSkeleton, binary.LittleEndian, &mystruct)
 		if err != nil {
 			fmt.Printf("Failed to write to file: %v\n", err)
-			d.fileForSkeleton.Sync()
 			return
 		}
-	}
-	d.fileForSkeleton.Sync()
-	batchHot := d.dbHot.NewBatch()
-	for _, putkey := range *ary {
-		key := skeletonHeaderKey(uint64(putkey.index))
-		batchHot.Delete(key, d.writeOptions)
-	}
-	if err := batchHot.Commit(d.writeOptions); err != nil {
-		d.log.Error("HotDB Delete Commit failed", "err", err)
 	}
 }
 
@@ -224,9 +214,11 @@ func (d *Database) skeletonMigration() {
 					break
 				} else {
 					*putkeys = append(*putkeys, entry)
-					if len(*putkeys) > commitThreshold {
+					if len(*putkeys) > migrationSkeletonBatchSize {
 						fmt.Println("mig: ", i)
 						d.WriteSkeletonHeaderToFile(putkeys)
+						d.fileForSkeleton.Sync()
+						d.DeleteSkeletonHeaderInSSD(putkeys)
 						putkeys = new([]*ARYFORFILE)
 					}
 				}
@@ -242,9 +234,11 @@ func (d *Database) skeletonMigration() {
 					break
 				} else {
 					*putkeys = append(*putkeys, entry)
-					if len(*putkeys) > commitThreshold {
+					if len(*putkeys) > migrationSkeletonBatchSize {
 						fmt.Println("mig: ", i)
 						d.WriteSkeletonHeaderToFile(putkeys)
+						d.fileForSkeleton.Sync()
+						d.DeleteSkeletonHeaderInSSD(putkeys)
 						putkeys = new([]*ARYFORFILE)
 					}
 				}
@@ -253,6 +247,8 @@ func (d *Database) skeletonMigration() {
 
 			if len(*putkeys) > 0 {
 				d.WriteSkeletonHeaderToFile(putkeys)
+				d.fileForSkeleton.Sync()
+				d.DeleteSkeletonHeaderInSSD(putkeys)
 			}
 		case <-d.quitChan:
 			return
@@ -261,52 +257,15 @@ func (d *Database) skeletonMigration() {
 
 }
 
-func (d *Database) onCompactionBegin(info pebble.CompactionInfo) {
-	if d.activeComp == 0 {
-		d.compStartTime = time.Now()
+func (d *Database) DeleteSkeletonHeaderInSSD(ary *[]*ARYFORFILE) {
+	batchHot := d.dbHot.NewBatch()
+	for _, putkey := range *ary {
+		key := skeletonHeaderKey(uint64(putkey.index))
+		batchHot.Delete(key, d.writeOptions)
 	}
-	l0 := info.Input[0]
-	if l0.Level == 0 {
-		d.level0Comp.Add(1)
-	} else {
-		d.nonLevel0Comp.Add(1)
+	if err := batchHot.Commit(d.writeOptions); err != nil {
+		d.log.Error("HotDB Delete Commit failed", "err", err)
 	}
-	d.activeComp++
-}
-
-func (d *Database) onCompactionEnd(info pebble.CompactionInfo) {
-	if d.activeComp == 1 {
-		d.compTime.Add(int64(time.Since(d.compStartTime)))
-	} else if d.activeComp == 0 {
-		panic("should not happen")
-	}
-	d.activeComp--
-}
-
-func (d *Database) onWriteStallBegin(b pebble.WriteStallBeginInfo) {
-	d.writeDelayStartTime = time.Now()
-	d.writeDelayCount.Add(1)
-	d.writeStalled.Store(true)
-}
-
-func (d *Database) onWriteStallEnd() {
-	d.writeDelayTime.Add(int64(time.Since(d.writeDelayStartTime)))
-	d.writeStalled.Store(false)
-}
-
-// panicLogger is just a noop logger to disable Pebble's internal logger.
-//
-// TODO(karalabe): Remove when Pebble sets this as the default.
-type panicLogger struct{}
-
-func (l panicLogger) Infof(format string, args ...interface{}) {
-}
-
-func (l panicLogger) Errorf(format string, args ...interface{}) {
-}
-
-func (l panicLogger) Fatalf(format string, args ...interface{}) {
-	panic(fmt.Errorf("fatal: "+format, args...))
 }
 
 // New returns a wrapped pebble DB object. The namespace is the prefix that the
@@ -471,7 +430,7 @@ func (d *Database) migration() error {
 			}
 			d.kvCnt.Add(int64(len(*putkeys)))
 
-			if d.kvCnt.Load() >= migrationThreshold {
+			if d.kvCnt.Load() >= migrationBatchSize {
 				d.kvCnt.Store(0)
 				if err := batch1.b.Write(); err != nil {
 					d.log.Error("ColdDB Put Commit failed", "err", err)
@@ -543,11 +502,11 @@ func (d *Database) prefetchSkeletonHeader() {
 		select {
 		case skeleton_idx := <-d.prefetchChan:
 			var localSkeleton map[string][]byte = make(map[string][]byte)
-			// End := prefetchNum + skeleton_idx
+			End := prefetchNum + skeleton_idx
 			skeletonFinalized := int(d.skeletonFinalized.Load())
-			// if End > skeletonFinalized {
-			End := skeletonFinalized
-			// }
+			if End > skeletonFinalized {
+				End = skeletonFinalized
+			}
 			file, err := os.Open(fileNameForSkeleton)
 			if err != nil {
 				fmt.Printf("Failed to open file: %v\n", err)
@@ -561,7 +520,7 @@ func (d *Database) prefetchSkeletonHeader() {
 					defer closer.Close()
 				}
 				if err == pebble.ErrNotFound {
-					dat, err := ReadSkeletonToFile(i, file)
+					dat, err := ReadSkeletonFromFile(i, file)
 					if err != nil {
 						fmt.Printf("Failed to read from file: %v\n", err)
 					} else {
@@ -592,7 +551,7 @@ func (d *Database) prefetchSkeletonHeader() {
 	}
 }
 
-func ReadSkeletonToFile(i int, file *os.File) ([]byte, error) {
+func ReadSkeletonFromFile(i int, file *os.File) ([]byte, error) {
 	_, err := file.Seek(onDiskSkeletonSize*int64(i), 0)
 	if err != nil {
 		fmt.Printf("Failed to seek: %v\n", err)
@@ -614,6 +573,25 @@ func ReadSkeletonToFile(i int, file *os.File) ([]byte, error) {
 	return ret, nil
 }
 
+func (d *Database) getFromSkeletonMem(skeletonIdx int) ([]byte, bool, error) {
+	d.skeletonMemLock.RLock()
+	defer d.skeletonMemLock.RUnlock()
+
+	key := skeletonHeaderKey(uint64(skeletonIdx))
+	if data, ok := d.skeletonMem[string(key)]; ok {
+		ret := make([]byte, len(data))
+		copy(ret, data)
+
+		fmt.Printf("idx: %d, ret: %d\n", skeletonIdx, len(ret))
+		if skeletonIdx <= int(d.skeletonFinalized.Load()) {
+			d.deleteSkeletonChan <- skeletonIdx
+		}
+		return ret, true, nil
+	}
+
+	return nil, false, nil
+}
+
 // Get retrieves the given key if it's present in the key-value store.
 func (d *Database) Get(idx int, key []byte) ([]byte, error) {
 	d.quitLock.RLock()
@@ -623,53 +601,43 @@ func (d *Database) Get(idx int, key []byte) ([]byte, error) {
 	}
 	skeleton_idx := idx / 100
 
-	if idx > 100 {
+	if isGetFile(idx) {
 		if (skeleton_idx)%prefetchNum == 1 {
 			d.prefetchChan <- skeleton_idx + prefetchNum
 		}
-		if idx%100 == 52 {
-			d.skeletonMemLock.RLock()
-			defer d.skeletonMemLock.RUnlock()
-			key := skeletonHeaderKey(uint64(skeleton_idx))
-			if dat, ok := d.skeletonMem[string(key)]; ok {
-				ret := make([]byte, len(dat))
-				copy(ret, dat)
-				fmt.Println("idx: ", skeleton_idx, "ret: ", len(ret))
-				if skeleton_idx <= int(d.skeletonFinalized.Load()) {
-					d.deleteSkeletonChan <- skeleton_idx
-				}
-				// delete(d.skeletonMem, string(skeleton_idx))
-				return ret, nil
-			}
+		data, found, err := d.getFromSkeletonMem(skeleton_idx)
+		if found && err != nil {
+			return data, nil
 		}
 	}
 
 	dat, closer, err := d.dbHot.Get(key)
 	if err != nil {
-		if idx%100 == 52 {
-			fmt.Println("key miss: ", skeleton_idx)
-		}
-		if err == pebble.ErrNotFound && isGetHDD(idx) {
-			if idx%100 == 52 {
+		if err == pebble.ErrNotFound {
+			if isGetFile(idx) {
+				fmt.Println("key miss: ", skeleton_idx)
 				file, err := os.Open(fileNameForSkeleton)
 				if err != nil {
 					fmt.Printf("Failed to open file: %v\n", err)
-				} else {
-					dat, err = ReadSkeletonToFile(skeleton_idx, file)
-					if err != nil {
-						fmt.Printf("Failed to read from file: %v\n", err)
-					} else {
-						err = nil
-					}
-					defer file.Close()
+					return nil, err
 				}
-			} else {
-				dat, err = d.dbCold.Get(idx, key)
+				dat, err = ReadSkeletonFromFile(skeleton_idx, file)
+				if err == nil && dat != nil {
+					ret := make([]byte, len(dat))
+					copy(ret, dat)
+					return ret, nil
+				}
+				defer file.Close()
+				return nil, err
 			}
-			if err == nil && dat != nil {
-				ret := make([]byte, len(dat))
-				copy(ret, dat)
-				return ret, nil
+			if isGetColdDB(idx) {
+				dat, err = d.dbCold.Get(idx, key)
+				if err == nil && dat != nil {
+					ret := make([]byte, len(dat))
+					copy(ret, dat)
+					return ret, nil
+				}
+				return nil, err
 			}
 		}
 		return nil, err
@@ -682,26 +650,6 @@ func (d *Database) Get(idx int, key []byte) ([]byte, error) {
 
 // Put inserts the given value into the key-value store.
 func (d *Database) Put(idx int, key []byte, value []byte) error {
-	// d.quitLock.RLock()
-	// defer d.quitLock.RUnlock()
-	// if d.closed {
-	// 	return pebble.ErrClosed
-	// }
-	// res := d.dbHot.Set(key, value, d.writeOptions)
-	// if isPutHDD(idx) {
-	// 	d.migrationChan <- &[]*ARYFORMIG{&ARYFORMIG{key: &key, value: &value}}
-	// }
-	// if idx%100 == 37 {
-	// 	skeleton_idx := idx / 100
-	// 	old_finalized := d.skeletonFinalized.Load()
-	// 	if old_finalized < int64(skeleton_idx) && d.skeletonFinalized.CompareAndSwap(old_finalized, int64(skeleton_idx)) {
-	// 		fmt.Printf("put old_finalized: %d skidx: %d\n", old_finalized, skeleton_idx)
-	// 		d.skeletonMigChan <- int(skeleton_idx) - 1
-	// 	}
-	// }
-	// if idx%100 == 38 {
-	// 	fmt.Println("put skeleton: ", len(value), idx/100)
-	// }
 	batch := d.NewBatch()
 	batch.Put(idx, key, value)
 	err := batch.Write()
@@ -779,7 +727,7 @@ func (snap *snapshot) Has(idx int, key []byte) (bool, error) {
 func (snap *snapshot) Get(idx int, key []byte) ([]byte, error) {
 	dat, closer, err := snap.dbHot.Get(key)
 	if err != nil {
-		if err == pebble.ErrNotFound && isGetHDD(idx) {
+		if err == pebble.ErrNotFound && isGetColdDB(idx) {
 			dat, err = snap.dbCold.Get(idx, key)
 			if err == nil {
 				ret := make([]byte, len(dat))
@@ -793,6 +741,238 @@ func (snap *snapshot) Get(idx int, key []byte) ([]byte, error) {
 	copy(ret, dat)
 	defer closer.Close()
 	return ret, nil
+}
+
+// batch is a write-only batch that commits changes to its host database
+// when Write is called. A batch cannot be used concurrently.
+type batch struct {
+	b       *pebble.Batch
+	db      *Database
+	putkeys []*ARYFORMIG
+	skkeys  []*ARYFORSK
+	size    int
+}
+
+type ARYFORSK struct {
+	key   *[]byte
+	value *[]byte
+	idx   int
+}
+
+type coldBatch struct {
+	b  ethdb.Batch
+	db *Database
+}
+
+type ARYFORMIG struct {
+	key   *[]byte
+	value *[]byte
+}
+
+// Put inserts the given value into the batch for later committing.
+func (b *batch) Put(idx int, key, value []byte) error {
+	if isPutColdDB(idx) {
+		b.putkeys = append(b.putkeys, &ARYFORMIG{key: &key, value: &value})
+	}
+
+	if isPutFile(idx) {
+		// fmt.Println("bput skeleton: ", len(value), idx/100)
+		b.skkeys = append(b.skkeys, &ARYFORSK{key: &key, value: &value, idx: idx})
+	}
+	b.b.Set(key, value, nil)
+	b.size += len(key) + len(value)
+	return nil
+}
+
+// Write flushes any accumulated data to disk.
+func (b *batch) Write() error {
+	b.db.quitLock.RLock()
+	defer b.db.quitLock.RUnlock()
+	if b.db.closed {
+		return pebble.ErrClosed
+	}
+	res := b.b.Commit(b.db.writeOptions)
+	if len(b.putkeys) > 0 {
+		b.db.migrationChan <- &b.putkeys
+		// go b.db.migrationNew(&b.putkeys)
+	}
+
+	if len(b.skkeys) > 0 {
+		for _, putkey := range b.skkeys {
+			idx := putkey.idx
+			if idx%100 == 37 {
+				skeleton_idx := idx / 100
+				old_finalized := b.db.skeletonFinalized.Load()
+				if old_finalized < int64(skeleton_idx) && b.db.skeletonFinalized.CompareAndSwap(old_finalized, int64(skeleton_idx)) {
+					b.db.skeletonMigChan <- int(skeleton_idx) - 1
+				}
+			}
+			// else if idx%100 == 38 {
+			// 	fmt.Println("put skeleton: ", len(*putkey.value), idx/100)
+			// }
+		}
+	}
+
+	return res
+}
+
+// Delete inserts the key removal into the batch for later committing.
+func (b *batch) Delete(key []byte) error {
+	b.b.Delete(key, nil)
+	b.size += len(key)
+	return nil
+}
+
+// ValueSize retrieves the amount of data queued up for writing.
+func (b *batch) ValueSize() int {
+	return b.size
+}
+
+// Reset resets the batch for reuse.
+func (b *batch) Reset() {
+	b.b.Reset()
+	b.size = 0
+}
+
+// Replay replays the batch contents.
+func (b *batch) Replay(w ethdb.KeyValueWriter) error {
+	reader := b.b.Reader()
+	for {
+		kind, k, v, ok, err := reader.Next()
+		if !ok || err != nil {
+			break
+		}
+		// The (k,v) slices might be overwritten if the batch is reset/reused,
+		// and the receiver should copy them if they are to be retained long-term.
+		if kind == pebble.InternalKeyKindSet {
+			w.Put(0, k, v)
+		} else if kind == pebble.InternalKeyKindDelete {
+			w.Delete(k)
+		} else {
+			return fmt.Errorf("unhandled operation, keytype: %v", kind)
+		}
+	}
+	return nil
+}
+
+// pebbleIterator is a wrapper of underlying iterator in storage engine.
+// The purpose of this structure is to implement the missing APIs.
+//
+// The pebble iterator is not thread-safe.
+type pebbleIterator struct {
+	iterHot   *pebble.Iterator
+	iterCold  ethdb.Iterator
+	validHot  bool
+	validCold bool
+	moved     bool
+	released  bool
+	turn      bool
+}
+
+// NewIterator creates a binary-alphabetical iterator over a subset
+// of database content with a particular key prefix, starting at a particular
+// initial key (or after, if it does not exist).
+func (d *Database) NewIterator(prefix []byte, start []byte) ethdb.Iterator {
+	iterHot, _ := d.dbHot.NewIter(&pebble.IterOptions{
+		LowerBound: append(prefix, start...),
+		UpperBound: upperBound(prefix),
+	})
+	iterCold := d.dbCold.NewIterator(prefix, start)
+	iterHot.First()
+	return &pebbleIterator{iterHot: iterHot, iterCold: iterCold, moved: true, released: false}
+}
+
+// Next moves the iterator to the next key/value pair. It returns whether the
+// iterator is exhausted.
+func (iter *pebbleIterator) Next() bool {
+	if iter.moved {
+		iter.moved = false
+		iter.validHot = iter.iterHot.Valid()
+		iter.validCold = iter.iterCold.Next()
+		if iter.validHot && iter.validCold {
+			res := bytes.Compare(iter.iterHot.Key(), iter.iterCold.Key())
+			if res < 0 {
+				iter.turn = true
+			} else if res > 0 {
+				iter.turn = false
+			} else {
+				iter.turn = true
+				iter.validCold = iter.iterCold.Next()
+			}
+		} else if iter.validHot {
+			iter.turn = true
+		} else if iter.validCold {
+			iter.turn = false
+		}
+		return iter.validHot || iter.validCold
+	}
+	if iter.turn {
+		iter.validHot = iter.iterHot.Next()
+	} else {
+		iter.validCold = iter.iterCold.Next()
+	}
+
+	if iter.validHot && iter.validCold {
+		res := bytes.Compare(iter.iterHot.Key(), iter.iterCold.Key())
+		if res > 0 {
+			iter.turn = false
+		} else if res < 0 {
+			iter.turn = true
+		} else {
+			if iter.turn {
+				iter.validCold = iter.iterCold.Next()
+			} else {
+				iter.validHot = iter.iterHot.Next()
+			}
+			if iter.validHot {
+				iter.turn = true
+			} else {
+				iter.turn = false
+			}
+		}
+	} else if iter.validHot {
+		iter.turn = true
+	} else if iter.validCold {
+		iter.turn = false
+	}
+
+	return iter.validHot || iter.validCold
+}
+
+// Error returns any accumulated error. Exhausting all the key/value pairs
+// is not considered to be an error.
+func (iter *pebbleIterator) Error() error {
+	return iter.iterHot.Error()
+}
+
+// Key returns the key of the current key/value pair, or nil if done. The caller
+// should not modify the contents of the returned slice, and its contents may
+// change on the next call to Next.
+func (iter *pebbleIterator) Key() []byte {
+	if iter.turn {
+		return iter.iterHot.Key()
+	}
+	return iter.iterCold.Key()
+}
+
+// Value returns the value of the current key/value pair, or nil if done. The
+// caller should not modify the contents of the returned slice, and its contents
+// may change on the next call to Next.
+func (iter *pebbleIterator) Value() []byte {
+	if iter.turn {
+		return iter.iterHot.Value()
+	}
+	return iter.iterCold.Value()
+}
+
+// Release releases associated resources. Release should always succeed and can
+// be called multiple times without causing error.
+func (iter *pebbleIterator) Release() {
+	if !iter.released {
+		iter.iterHot.Close()
+		iter.iterCold.Release()
+		iter.released = true
+	}
 }
 
 // Release releases associated resources. Release should always succeed and can
@@ -962,36 +1142,67 @@ func (d *Database) meter(refresh time.Duration, namespace string) {
 	errc <- nil
 }
 
-// batch is a write-only batch that commits changes to its host database
-// when Write is called. A batch cannot be used concurrently.
-type batch struct {
-	b       *pebble.Batch
-	db      *Database
-	putkeys []*ARYFORMIG
-	skkeys  []*ARYFORSK
-	size    int
+func (d *Database) onCompactionBegin(info pebble.CompactionInfo) {
+	if d.activeComp == 0 {
+		d.compStartTime = time.Now()
+	}
+	l0 := info.Input[0]
+	if l0.Level == 0 {
+		d.level0Comp.Add(1)
+	} else {
+		d.nonLevel0Comp.Add(1)
+	}
+	d.activeComp++
 }
 
-type ARYFORSK struct {
-	key   *[]byte
-	value *[]byte
-	idx   int
+func (d *Database) onCompactionEnd(info pebble.CompactionInfo) {
+	if d.activeComp == 1 {
+		d.compTime.Add(int64(time.Since(d.compStartTime)))
+	} else if d.activeComp == 0 {
+		panic("should not happen")
+	}
+	d.activeComp--
 }
 
-type coldBatch struct {
-	b  ethdb.Batch
-	db *Database
+func (d *Database) onWriteStallBegin(b pebble.WriteStallBeginInfo) {
+	d.writeDelayStartTime = time.Now()
+	d.writeDelayCount.Add(1)
+	d.writeStalled.Store(true)
 }
 
-type ARYFORMIG struct {
-	key   *[]byte
-	value *[]byte
+func (d *Database) onWriteStallEnd() {
+	d.writeDelayTime.Add(int64(time.Since(d.writeDelayStartTime)))
+	d.writeStalled.Store(false)
 }
 
-func isPutHDD(idx int) bool {
+// panicLogger is just a noop logger to disable Pebble's internal logger.
+//
+// TODO(karalabe): Remove when Pebble sets this as the default.
+type panicLogger struct{}
+
+func (l panicLogger) Infof(format string, args ...interface{}) {
+}
+
+func (l panicLogger) Errorf(format string, args ...interface{}) {
+}
+
+func (l panicLogger) Fatalf(format string, args ...interface{}) {
+	panic(fmt.Errorf("fatal: "+format, args...))
+}
+
+func isPutFile(idx int) bool {
+	var skeletonIdx = []int{37, 38}
+	for _, i := range skeletonIdx {
+		if i == idx%100 {
+			return true
+		}
+	}
+	return false
+}
+
+func isPutColdDB(idx int) bool {
 	var trieIdx = []int{40, 41, 42}
 	var snapshotIdx = []int{27, 28, 29, 30, 31, 32}
-	// var skeleton int = 38
 	if idx-100 >= 0 {
 		idx = idx % 100
 		skeleton_idx := idx / 100
@@ -1010,7 +1221,48 @@ func isPutHDD(idx int) bool {
 		}
 	}
 	return false
-	// return idx == skeleton
+}
+
+func isGetColdDB(idx int) bool {
+	var trieIdx = []int{54, 55, 56}
+	var snapshotIdx = []int{39, 40, 41, 42, 43, 44}
+	for _, i := range trieIdx {
+		if i == idx {
+			return true
+		}
+	}
+	for _, i := range snapshotIdx {
+		if i == idx {
+			return true
+		}
+	}
+	if idx-100 >= 0 {
+		skeleton_idx := idx / 100
+		if skeleton_idx == 1 {
+			return false
+		}
+	}
+	return false
+}
+
+func isGetFile(idx int) bool {
+	var skeletonIdx = []int{52}
+	for _, i := range skeletonIdx {
+		if i == idx%100 {
+			return true
+		}
+	}
+	return false
+}
+
+func isHasHDD(idx int) bool {
+	var trieIdx = []int{7, 8, 9}
+	for _, i := range trieIdx {
+		if i == idx {
+			return true
+		}
+	}
+	return false
 }
 
 func encodeBlockNumber(number uint64) []byte {
@@ -1029,245 +1281,4 @@ func decodeBlockNumber(enc []byte) uint64 {
 
 func skeletonHeaderKey(number uint64) []byte {
 	return append([]byte("S"), encodeBlockNumber(number)...)
-}
-
-func isGetHDD(idx int) bool {
-	if idx-100 >= 0 {
-		idx = idx % 100
-		skeleton_idx := idx / 100
-		if skeleton_idx == 1 {
-			return false
-		}
-	}
-	var trieIdx = []int{54, 55, 56}
-	var snapshotIdx = []int{39, 40, 41, 42, 43, 44}
-	var skeleton int = 52
-	for _, i := range trieIdx {
-		if i == idx {
-			return true
-		}
-	}
-	for _, i := range snapshotIdx {
-		if i == idx {
-			return true
-		}
-	}
-	return idx%100 == skeleton
-	// return idx == skeleton
-}
-
-func isHasHDD(idx int) bool {
-	var trieIdx = []int{7, 8, 9}
-	for _, i := range trieIdx {
-		if i == idx {
-			return true
-		}
-	}
-	return false
-}
-
-// Put inserts the given value into the batch for later committing.
-func (b *batch) Put(idx int, key, value []byte) error {
-	if isPutHDD(idx) {
-		b.putkeys = append(b.putkeys, &ARYFORMIG{key: &key, value: &value})
-	}
-
-	if idx%100 == 38 || idx%100 == 37 {
-		// fmt.Println("bput skeleton: ", len(value), idx/100)
-		b.skkeys = append(b.skkeys, &ARYFORSK{key: &key, value: &value, idx: idx})
-	}
-	b.b.Set(key, value, nil)
-	b.size += len(key) + len(value)
-	return nil
-}
-
-// Delete inserts the key removal into the batch for later committing.
-func (b *batch) Delete(key []byte) error {
-	b.b.Delete(key, nil)
-	b.size += len(key)
-	return nil
-}
-
-// ValueSize retrieves the amount of data queued up for writing.
-func (b *batch) ValueSize() int {
-	return b.size
-}
-
-// Write flushes any accumulated data to disk.
-func (b *batch) Write() error {
-	b.db.quitLock.RLock()
-	defer b.db.quitLock.RUnlock()
-	if b.db.closed {
-		return pebble.ErrClosed
-	}
-	res := b.b.Commit(b.db.writeOptions)
-	if len(b.putkeys) > 0 {
-		b.db.migrationChan <- &b.putkeys
-		// go b.db.migrationNew(&b.putkeys)
-	}
-
-	if len(b.skkeys) > 0 {
-		for _, putkey := range b.skkeys {
-			idx := putkey.idx
-			if idx%100 == 37 {
-				skeleton_idx := idx / 100
-				old_finalized := b.db.skeletonFinalized.Load()
-				if old_finalized < int64(skeleton_idx) && b.db.skeletonFinalized.CompareAndSwap(old_finalized, int64(skeleton_idx)) {
-					b.db.skeletonMigChan <- int(skeleton_idx) - 1
-				}
-			}
-			// else if idx%100 == 38 {
-			// 	fmt.Println("put skeleton: ", len(*putkey.value), idx/100)
-			// }
-		}
-	}
-
-	return res
-}
-
-// Reset resets the batch for reuse.
-func (b *batch) Reset() {
-	b.b.Reset()
-	b.size = 0
-}
-
-// Replay replays the batch contents.
-func (b *batch) Replay(w ethdb.KeyValueWriter) error {
-	reader := b.b.Reader()
-	for {
-		kind, k, v, ok, err := reader.Next()
-		if !ok || err != nil {
-			break
-		}
-		// The (k,v) slices might be overwritten if the batch is reset/reused,
-		// and the receiver should copy them if they are to be retained long-term.
-		if kind == pebble.InternalKeyKindSet {
-			w.Put(0, k, v)
-		} else if kind == pebble.InternalKeyKindDelete {
-			w.Delete(k)
-		} else {
-			return fmt.Errorf("unhandled operation, keytype: %v", kind)
-		}
-	}
-	return nil
-}
-
-// pebbleIterator is a wrapper of underlying iterator in storage engine.
-// The purpose of this structure is to implement the missing APIs.
-//
-// The pebble iterator is not thread-safe.
-type pebbleIterator struct {
-	iterHot   *pebble.Iterator
-	iterCold  ethdb.Iterator
-	validHot  bool
-	validCold bool
-	moved     bool
-	released  bool
-	turn      bool
-}
-
-// NewIterator creates a binary-alphabetical iterator over a subset
-// of database content with a particular key prefix, starting at a particular
-// initial key (or after, if it does not exist).
-func (d *Database) NewIterator(prefix []byte, start []byte) ethdb.Iterator {
-	iterHot, _ := d.dbHot.NewIter(&pebble.IterOptions{
-		LowerBound: append(prefix, start...),
-		UpperBound: upperBound(prefix),
-	})
-	iterCold := d.dbCold.NewIterator(prefix, start)
-	iterHot.First()
-	return &pebbleIterator{iterHot: iterHot, iterCold: iterCold, moved: true, released: false}
-}
-
-// Next moves the iterator to the next key/value pair. It returns whether the
-// iterator is exhausted.
-func (iter *pebbleIterator) Next() bool {
-	if iter.moved {
-		iter.moved = false
-		iter.validHot = iter.iterHot.Valid()
-		iter.validCold = iter.iterCold.Next()
-		if iter.validHot && iter.validCold {
-			res := bytes.Compare(iter.iterHot.Key(), iter.iterCold.Key())
-			if res < 0 {
-				iter.turn = true
-			} else if res > 0 {
-				iter.turn = false
-			} else {
-				iter.turn = true
-				iter.validCold = iter.iterCold.Next()
-			}
-		} else if iter.validHot {
-			iter.turn = true
-		} else if iter.validCold {
-			iter.turn = false
-		}
-		return iter.validHot || iter.validCold
-	}
-	if iter.turn {
-		iter.validHot = iter.iterHot.Next()
-	} else {
-		iter.validCold = iter.iterCold.Next()
-	}
-
-	if iter.validHot && iter.validCold {
-		res := bytes.Compare(iter.iterHot.Key(), iter.iterCold.Key())
-		if res > 0 {
-			iter.turn = false
-		} else if res < 0 {
-			iter.turn = true
-		} else {
-			if iter.turn {
-				iter.validCold = iter.iterCold.Next()
-			} else {
-				iter.validHot = iter.iterHot.Next()
-			}
-			if iter.validHot {
-				iter.turn = true
-			} else {
-				iter.turn = false
-			}
-		}
-	} else if iter.validHot {
-		iter.turn = true
-	} else if iter.validCold {
-		iter.turn = false
-	}
-
-	return iter.validHot || iter.validCold
-}
-
-// Error returns any accumulated error. Exhausting all the key/value pairs
-// is not considered to be an error.
-func (iter *pebbleIterator) Error() error {
-	return iter.iterHot.Error()
-}
-
-// Key returns the key of the current key/value pair, or nil if done. The caller
-// should not modify the contents of the returned slice, and its contents may
-// change on the next call to Next.
-func (iter *pebbleIterator) Key() []byte {
-	if iter.turn {
-		return iter.iterHot.Key()
-	}
-	return iter.iterCold.Key()
-}
-
-// Value returns the value of the current key/value pair, or nil if done. The
-// caller should not modify the contents of the returned slice, and its contents
-// may change on the next call to Next.
-func (iter *pebbleIterator) Value() []byte {
-	if iter.turn {
-		return iter.iterHot.Value()
-	}
-	return iter.iterCold.Value()
-}
-
-// Release releases associated resources. Release should always succeed and can
-// be called multiple times without causing error.
-func (iter *pebbleIterator) Release() {
-	if !iter.released {
-		iter.iterHot.Close()
-		iter.iterCold.Release()
-		iter.released = true
-	}
 }
