@@ -55,7 +55,8 @@ const (
 
 	fileNameForSkeleton = "/home/yhseo/nvme/ethereum/execution/data/geth/chaindata/ancient/chain/skeleton.txt"
 	// fileNameForSkeleton = "/home/yhseo/nvme/ethereum/execution/data/geth/chaindata/ancient/skeleton.txt"
-	prefetchNum = 100000
+	prefetchNum     = 100000
+	getMemBatchSize = 10000
 
 	hddPath                    = "/home/yhseo/nvme/ethereum/execution/data/geth/chaindata/ancient/chain"
 	skeletonMaxLen             = 1016
@@ -110,14 +111,16 @@ type Database struct {
 
 	writeOptions *pebble.WriteOptions
 
-	skeletonFinalized  atomic.Int64
-	prefetchChan       chan int
-	skeletonMem        map[string][]byte
-	skeletonMigChan    chan int
-	skeletonMemLock    sync.RWMutex
-	migrationStopped   int
-	fileForSkeleton    *os.File
-	deleteSkeletonChan chan int
+	skeletonFinalized   atomic.Int64
+	prefetchChan        chan int
+	skeletonMem         map[string][]byte
+	skeletonMigChan     chan int
+	skeletonMemLock     sync.RWMutex
+	migrationStopped    int
+	fileForSkeleton     *os.File
+	deleteSkeletonChan  chan int
+	isMigratingSkeleton atomic.Bool
+	isStartedPrefetch   atomic.Bool
 }
 
 type onDiskSkeletonHeader struct {
@@ -195,66 +198,83 @@ func (d *Database) processKV(idx int) (*ARYFORFILE, error) {
 	return ret, nil
 }
 
+func (d *Database) skeletonWriteAndDelete(ary *[]*ARYFORFILE) {
+	d.WriteSkeletonHeaderToFile(ary)
+	d.fileForSkeleton.Sync()
+	d.DeleteSkeletonHeaderInSSD(ary)
+	fmt.Println("mig start ", (*ary)[0].index, "end ", (*ary)[len(*ary)-1].index)
+}
+
 func (d *Database) skeletonMigration() {
+	ticker := time.NewTicker(3 * time.Minute)
+	defer ticker.Stop()
+
 	for {
 		select {
-		case old_finalized := <-d.skeletonMigChan:
-			first := d.migrationStopped == -1
-			fmt.Printf("mig old_finalized: %d\n", old_finalized)
-			putkeys := new([]*ARYFORFILE)
-			for i := old_finalized; i > prefetchNum; i-- {
-				entry, err := d.processKV(i)
-				if err != nil {
-					if err == pebble.ErrNotFound {
-						fmt.Println("mig: ", i, " not found")
-						if first {
-							d.migrationStopped = i
-						}
-					}
-					break
-				} else {
-					*putkeys = append(*putkeys, entry)
-					if len(*putkeys) > migrationSkeletonBatchSize {
-						fmt.Println("mig: ", i)
-						d.WriteSkeletonHeaderToFile(putkeys)
-						d.fileForSkeleton.Sync()
-						d.DeleteSkeletonHeaderInSSD(putkeys)
-						putkeys = new([]*ARYFORFILE)
-					}
-				}
+		case oldFinalized := <-d.skeletonMigChan:
+			fmt.Printf("mig old_finalized: %d\n", oldFinalized)
+			d.handleFullMigration(oldFinalized)
+		case <-ticker.C:
+			fmt.Println("Running periodic migration")
+			if !d.isMigratingSkeleton.Load() {
+				d.handlePeriodicMigration()
 			}
 
-			for i := d.migrationStopped; i > prefetchNum; i-- {
-				entry, err := d.processKV(i)
-				if err != nil {
-					if err == pebble.ErrNotFound {
-						fmt.Println("mig: ", i, " not found")
-						d.migrationStopped = i
-					}
-					break
-				} else {
-					*putkeys = append(*putkeys, entry)
-					if len(*putkeys) > migrationSkeletonBatchSize {
-						fmt.Println("mig: ", i)
-						d.WriteSkeletonHeaderToFile(putkeys)
-						d.fileForSkeleton.Sync()
-						d.DeleteSkeletonHeaderInSSD(putkeys)
-						putkeys = new([]*ARYFORFILE)
-					}
-				}
-			}
-			fmt.Println("pk: ", len(*putkeys))
-
-			if len(*putkeys) > 0 {
-				d.WriteSkeletonHeaderToFile(putkeys)
-				d.fileForSkeleton.Sync()
-				d.DeleteSkeletonHeaderInSSD(putkeys)
-			}
 		case <-d.quitChan:
+			fmt.Println("Stopping migration")
 			return
 		}
 	}
+}
 
+func (d *Database) handleFullMigration(oldFinalized int) {
+	d.isMigratingSkeleton.Store(true)
+	defer d.isMigratingSkeleton.Store(false)
+	first := d.migrationStopped == -1
+	putkeys := new([]*ARYFORFILE)
+
+	for i := oldFinalized; i > 0; i-- {
+		entry, err := d.processKV(i)
+		if err != nil {
+			if err == pebble.ErrNotFound && first {
+				d.migrationStopped = i
+			}
+			break
+		}
+		*putkeys = append(*putkeys, entry)
+		if len(*putkeys) > migrationSkeletonBatchSize {
+			d.skeletonWriteAndDelete(putkeys)
+			putkeys = new([]*ARYFORFILE)
+		}
+	}
+	d.runMigrationSkeletonLoop(putkeys)
+}
+
+func (d *Database) handlePeriodicMigration() {
+	d.isMigratingSkeleton.Store(true)
+	defer d.isMigratingSkeleton.Store(false)
+	putkeys := new([]*ARYFORFILE)
+	d.runMigrationSkeletonLoop(putkeys)
+}
+
+func (d *Database) runMigrationSkeletonLoop(putkeys *[]*ARYFORFILE) {
+	for i := d.migrationStopped; i > 0; i-- {
+		entry, err := d.processKV(i)
+		if err != nil {
+			if err == pebble.ErrNotFound {
+				d.migrationStopped = i
+			}
+			break
+		}
+		*putkeys = append(*putkeys, entry)
+		if len(*putkeys) > migrationSkeletonBatchSize {
+			d.skeletonWriteAndDelete(putkeys)
+			putkeys = new([]*ARYFORFILE)
+		}
+	}
+	if len(*putkeys) > 0 {
+		d.skeletonWriteAndDelete(putkeys)
+	}
 }
 
 func (d *Database) DeleteSkeletonHeaderInSSD(ary *[]*ARYFORFILE) {
@@ -401,6 +421,8 @@ func New(file string, cache int, handles int, namespace string, readonly bool, e
 	db.seekCompGauge = metrics.GetOrRegisterGauge(namespace+"compact/seek", nil)
 	db.manualMemAllocGauge = metrics.GetOrRegisterGauge(namespace+"memory/manualalloc", nil)
 
+	fmt.Println("prefetch: ", prefetchNum, "migrationSkeletonBatchSize: ", migrationSkeletonBatchSize, "migrationBatchSize: ", migrationBatchSize, "deleteBatchSize: ", deleteBatchSize, "getMemBatchSize: ", getMemBatchSize)
+
 	// Print CPU max in setting
 	fmt.Printf("procs %d\n", runtime.GOMAXPROCS(0))
 	// Start up the metrics gathering and return
@@ -413,18 +435,18 @@ func New(file string, cache int, handles int, namespace string, readonly bool, e
 }
 
 func (d *Database) migration() error {
-	batch1 := &coldBatch{
+	batchCold := &coldBatch{
 		b:  d.dbCold.NewBatch(),
 		db: d,
 	}
-	batch2 := d.dbHot.NewBatch()
-	defer batch2.Close()
+	batchHot := d.dbHot.NewBatch()
+	defer batchHot.Close()
 	for {
 		select {
 		case putkeys := <-d.migrationChan:
 			for _, putkey := range *putkeys {
-				batch1.PutCold(*putkey.key, *putkey.value)
-				if err := batch2.Delete(*putkey.key, d.writeOptions); err != nil {
+				batchCold.PutCold(*putkey.key, *putkey.value)
+				if err := batchHot.Delete(*putkey.key, d.writeOptions); err != nil {
 					panic(err)
 				}
 			}
@@ -432,17 +454,17 @@ func (d *Database) migration() error {
 
 			if d.kvCnt.Load() >= migrationBatchSize {
 				d.kvCnt.Store(0)
-				if err := batch1.b.Write(); err != nil {
+				if err := batchCold.b.Write(); err != nil {
 					d.log.Error("ColdDB Put Commit failed", "err", err)
 				}
-				if err := batch2.Commit(d.writeOptions); err != nil {
+				if err := batchHot.Commit(d.writeOptions); err != nil {
 					d.log.Error("HotDB Delete Commit failed", "err", err)
 				}
-				batch1 = &coldBatch{
+				batchCold = &coldBatch{
 					b:  d.dbCold.NewBatch(),
 					db: d,
 				}
-				batch2 = d.dbHot.NewBatch()
+				batchHot = d.dbHot.NewBatch()
 			}
 		case <-d.quitChan:
 			return nil
@@ -501,6 +523,9 @@ func (d *Database) prefetchSkeletonHeader() {
 	for {
 		select {
 		case skeleton_idx := <-d.prefetchChan:
+			d.isStartedPrefetch.Store(true)
+			defer d.isStartedPrefetch.Store(false)
+
 			var localSkeleton map[string][]byte = make(map[string][]byte)
 			End := prefetchNum + skeleton_idx
 			skeletonFinalized := int(d.skeletonFinalized.Load())
@@ -512,7 +537,7 @@ func (d *Database) prefetchSkeletonHeader() {
 				fmt.Printf("Failed to open file: %v\n", err)
 			}
 			defer file.Close()
-
+			fmt.Println("prefetch start: ", skeleton_idx, "end: ", End)
 			for i := skeleton_idx; i < End; i++ {
 				key := skeletonHeaderKey(uint64(i))
 				dat, closer, err := d.dbHot.Get(key)
@@ -535,8 +560,7 @@ func (d *Database) prefetchSkeletonHeader() {
 					copy(ret, dat)
 					localSkeleton[string(key)] = ret
 				}
-				if len(localSkeleton) > prefetchNum {
-					fmt.Println("prefetch: ", i)
+				if len(localSkeleton) >= getMemBatchSize {
 					d.skeletonMemLock.Lock()
 					for key, value := range localSkeleton {
 						d.skeletonMem[key] = value
@@ -552,7 +576,8 @@ func (d *Database) prefetchSkeletonHeader() {
 }
 
 func ReadSkeletonFromFile(i int, file *os.File) ([]byte, error) {
-	_, err := file.Seek(onDiskSkeletonSize*int64(i), 0)
+	offset := onDiskSkeletonSize * int64(i)
+	_, err := file.Seek(offset, 0)
 	if err != nil {
 		fmt.Printf("Failed to seek: %v\n", err)
 		return nil, err
@@ -603,7 +628,10 @@ func (d *Database) Get(idx int, key []byte) ([]byte, error) {
 
 	if isGetFile(idx) {
 		if (skeleton_idx)%prefetchNum == 1 {
-			d.prefetchChan <- skeleton_idx + prefetchNum
+			fmt.Println("prefetch: ", skeleton_idx+prefetchNum)
+			if !d.isStartedPrefetch.Load() {
+				d.prefetchChan <- skeleton_idx + prefetchNum
+			}
 		}
 		data, found, err := d.getFromSkeletonMem(skeleton_idx)
 		if found && err != nil {
@@ -800,16 +828,18 @@ func (b *batch) Write() error {
 	if len(b.skkeys) > 0 {
 		for _, putkey := range b.skkeys {
 			idx := putkey.idx
+			skeleton_idx := idx / 100
 			if idx%100 == 37 {
-				skeleton_idx := idx / 100
 				old_finalized := b.db.skeletonFinalized.Load()
 				if old_finalized < int64(skeleton_idx) && b.db.skeletonFinalized.CompareAndSwap(old_finalized, int64(skeleton_idx)) {
 					b.db.skeletonMigChan <- int(skeleton_idx) - 1
 				}
 			}
-			// else if idx%100 == 38 {
-			// 	fmt.Println("put skeleton: ", len(*putkey.value), idx/100)
-			// }
+			if idx%100 == 38 && skeleton_idx < prefetchNum {
+				b.db.skeletonMemLock.Lock()
+				b.db.skeletonMem[string(skeletonHeaderKey(uint64(skeleton_idx)))] = *putkey.value
+				b.db.skeletonMemLock.Unlock()
+			}
 		}
 	}
 
