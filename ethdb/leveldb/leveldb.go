@@ -415,12 +415,12 @@ func (b *batch) ValueSize() int {
 
 // Write flushes any accumulated data to disk.
 func (b *batch) Write() error {
-	// opt := &opt.WriteOptions{}
+	opt := &opt.WriteOptions{}
 	// opt.NoWriteMerge = false
-	// opt.Sync = false
+	opt.Sync = true
 
-	// return b.db.Write(b.b, opt)
-	return b.db.Write(b.b, nil)
+	return b.db.Write(b.b, opt)
+	// return b.db.Write(b.b, nil)
 }
 
 // Reset resets the batch for reuse.
