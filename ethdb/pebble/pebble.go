@@ -310,7 +310,7 @@ func New(file string, cache int, handles int, namespace string, readonly bool, e
 	// Two memory tables is configured which is identical to leveldb,
 	// including a frozen memory table and another live one.
 	memTableLimit := 2
-	memTableSize := cache * 1024 * 1024 / 2 / memTableLimit
+	memTableSize := cache * 1024 * 1024 / 2 / memTableLimit // 2MB
 
 	// The memory table size is currently capped at maxMemTableSize-1 due to a
 	// known bug in the pebble where maxMemTableSize is not recognized as a
@@ -387,7 +387,19 @@ func New(file string, cache int, handles int, namespace string, readonly bool, e
 	db.dbHot = innerDB1
 	opt2 := opt
 	opt2.DisableWAL = true
+	var fileSize int64 = 64 * 1024 * 1024
+	opt2.MemTableSize = uint64(fileSize)
+
+	opt2.Levels[0] = pebble.LevelOptions{TargetFileSize: fileSize, FilterPolicy: bloom.FilterPolicy(10)}
+	opt2.Levels[1] = pebble.LevelOptions{TargetFileSize: fileSize, FilterPolicy: bloom.FilterPolicy(10)}
+	opt2.Levels[2] = pebble.LevelOptions{TargetFileSize: fileSize, FilterPolicy: bloom.FilterPolicy(10)}
+	opt2.Levels[3] = pebble.LevelOptions{TargetFileSize: fileSize, FilterPolicy: bloom.FilterPolicy(10)}
+	opt2.Levels[4] = pebble.LevelOptions{TargetFileSize: fileSize, FilterPolicy: bloom.FilterPolicy(10)}
+	opt2.Levels[5] = pebble.LevelOptions{TargetFileSize: fileSize, FilterPolicy: bloom.FilterPolicy(10)}
+	opt2.Levels[6] = pebble.LevelOptions{TargetFileSize: fileSize, FilterPolicy: bloom.FilterPolicy(10)}
 	fmt.Println("wal: ", opt.DisableWAL)
+	// opt2.BytesPerSync = 1024 * 1024 * 1024
+	// opt2.WALBytesPerSync = 1024 * 1024 * 1024
 	// innerDB2, err := leveldb.New(hddPath, cache, handles, namespace, readonly)
 	innerDB2, err := pebble.Open(hddPath, opt2)
 	if err != nil {
@@ -454,6 +466,10 @@ func (d *Database) migration() error {
 				if err := batchCold.b.Commit(d.writeOptionsCold); err != nil {
 					d.log.Error("ColdDB Put Commit failed", "err", err)
 				}
+				// err := d.dbCold.Flush()
+				// if err != nil {
+				// 	d.log.Error("ColdDB Flush failed", "err", err)
+				// }
 				if err := batchHot.Commit(d.writeOptions); err != nil {
 					d.log.Error("HotDB Delete Commit failed", "err", err)
 				}
