@@ -118,7 +118,7 @@ type Database struct {
 	skeletonMigChan chan int
 	// skeletonMemLock     sync.RWMutex
 	migrationStopped int
-	fileForSkeleton  *os.File
+	// fileForSkeleton  *os.File
 	// deleteSkeletonChan  chan int
 	isMigratingSkeleton atomic.Bool
 	// isStartedPrefetch   atomic.Bool
@@ -157,26 +157,26 @@ type ARYFORFILE struct {
 // 	}
 // }
 
-func (d *Database) WriteSkeletonHeaderToFile(ary *[]*ARYFORFILE) {
-	for _, putkey := range *ary {
-		var mystruct onDiskSkeletonHeader
-		mystruct.DataLen = uint64(len(putkey.value))
-		if len(putkey.value) > 1016 {
-			fmt.Println("dataLen: ", len(putkey.value))
-		}
-		copy(mystruct.Data[:], putkey.value)
-		_, err := d.fileForSkeleton.Seek(onDiskSkeletonSize*putkey.index, 0)
-		if err != nil {
-			fmt.Printf("Failed to seek: %v\n", err)
-			return
-		}
-		err = binary.Write(d.fileForSkeleton, binary.LittleEndian, &mystruct)
-		if err != nil {
-			fmt.Printf("Failed to write to file: %v\n", err)
-			return
-		}
-	}
-}
+// func (d *Database) WriteSkeletonHeaderToFile(ary *[]*ARYFORFILE) {
+// 	for _, putkey := range *ary {
+// 		var mystruct onDiskSkeletonHeader
+// 		mystruct.DataLen = uint64(len(putkey.value))
+// 		if len(putkey.value) > 1016 {
+// 			fmt.Println("dataLen: ", len(putkey.value))
+// 		}
+// 		copy(mystruct.Data[:], putkey.value)
+// 		_, err := d.fileForSkeleton.Seek(onDiskSkeletonSize*putkey.index, 0)
+// 		if err != nil {
+// 			fmt.Printf("Failed to seek: %v\n", err)
+// 			return
+// 		}
+// 		err = binary.Write(d.fileForSkeleton, binary.LittleEndian, &mystruct)
+// 		if err != nil {
+// 			fmt.Printf("Failed to write to file: %v\n", err)
+// 			return
+// 		}
+// 	}
+// }
 
 func (d *Database) processKV(idx int) (*ARYFORFILE, error) {
 	key := skeletonHeaderKey(uint64(idx))
@@ -192,12 +192,12 @@ func (d *Database) processKV(idx int) (*ARYFORFILE, error) {
 	return ret, nil
 }
 
-func (d *Database) skeletonWriteAndDelete(ary *[]*ARYFORFILE) {
-	d.WriteSkeletonHeaderToFile(ary)
-	d.fileForSkeleton.Sync()
-	d.DeleteSkeletonHeaderInSSD(ary)
-	// fmt.Println("mig start ", (*ary)[0].index, "end ", (*ary)[len(*ary)-1].index)
-}
+// func (d *Database) skeletonWriteAndDelete(ary *[]*ARYFORFILE) {
+// 	d.WriteSkeletonHeaderToFile(ary)
+// 	d.fileForSkeleton.Sync()
+// 	d.DeleteSkeletonHeaderInSSD(ary)
+// 	// fmt.Println("mig start ", (*ary)[0].index, "end ", (*ary)[len(*ary)-1].index)
+// }
 
 func (d *Database) skeletonMigration() {
 	ticker := time.NewTicker(3 * time.Minute)
@@ -237,7 +237,8 @@ func (d *Database) handleFullMigration(oldFinalized int) {
 		}
 		*putkeys = append(*putkeys, entry)
 		if len(*putkeys) > migrationSkeletonBatchSize {
-			d.skeletonWriteAndDelete(putkeys)
+			// d.skeletonWriteAndDelete(putkeys)
+			d.migrationChan <- d.convertFileToMig(putkeys)
 			putkeys = new([]*ARYFORFILE)
 		}
 	}
@@ -262,12 +263,15 @@ func (d *Database) runMigrationSkeletonLoop(putkeys *[]*ARYFORFILE) {
 		}
 		*putkeys = append(*putkeys, entry)
 		if len(*putkeys) > migrationSkeletonBatchSize {
-			d.skeletonWriteAndDelete(putkeys)
+			// d.skeletonWriteAndDelete(putkeys)
+			d.migrationChan <- d.convertFileToMig(putkeys)
 			putkeys = new([]*ARYFORFILE)
+
 		}
 	}
 	if len(*putkeys) > 0 {
-		d.skeletonWriteAndDelete(putkeys)
+		// d.skeletonWriteAndDelete(putkeys)
+		d.migrationChan <- d.convertFileToMig(putkeys)
 	}
 }
 
@@ -330,7 +334,7 @@ func New(file string, cache int, handles int, namespace string, readonly bool, e
 		skeletonMigChan: make(chan int, 100000),
 		// deleteSkeletonChan: make(chan int, 100000),
 		writeOptions:     &pebble.WriteOptions{Sync: !ephemeral},
-		writeOptionsCold: &pebble.WriteOptions{Sync: false},
+		writeOptionsCold: &pebble.WriteOptions{Sync: !ephemeral},
 		migrationStopped: -1,
 	}
 	opt := &pebble.Options{
@@ -385,33 +389,34 @@ func New(file string, cache int, handles int, namespace string, readonly bool, e
 		return nil, err
 	}
 	db.dbHot = innerDB1
-	opt2 := opt
-	opt2.DisableWAL = true
-	var fileSize int64 = 64 * 1024 * 1024
-	opt2.MemTableSize = uint64(fileSize)
+	// opt2 := opt
+	// opt2.DisableWAL = true
+	// var fileSize int64 = 64 * 1024 * 1024
+	// opt2.MemTableSize = uint64(fileSize)
 
-	opt2.Levels[0] = pebble.LevelOptions{TargetFileSize: fileSize, FilterPolicy: bloom.FilterPolicy(10)}
-	opt2.Levels[1] = pebble.LevelOptions{TargetFileSize: fileSize, FilterPolicy: bloom.FilterPolicy(10)}
-	opt2.Levels[2] = pebble.LevelOptions{TargetFileSize: fileSize, FilterPolicy: bloom.FilterPolicy(10)}
-	opt2.Levels[3] = pebble.LevelOptions{TargetFileSize: fileSize, FilterPolicy: bloom.FilterPolicy(10)}
-	opt2.Levels[4] = pebble.LevelOptions{TargetFileSize: fileSize, FilterPolicy: bloom.FilterPolicy(10)}
-	opt2.Levels[5] = pebble.LevelOptions{TargetFileSize: fileSize, FilterPolicy: bloom.FilterPolicy(10)}
-	opt2.Levels[6] = pebble.LevelOptions{TargetFileSize: fileSize, FilterPolicy: bloom.FilterPolicy(10)}
-	fmt.Println("wal: ", opt.DisableWAL)
-	opt2.BytesPerSync = 1024 * 1024 * 1024
-	opt2.WALBytesPerSync = 1024 * 1024 * 1024
+	// opt2.Levels[0] = pebble.LevelOptions{TargetFileSize: fileSize, FilterPolicy: bloom.FilterPolicy(10)}
+	// opt2.Levels[1] = pebble.LevelOptions{TargetFileSize: fileSize, FilterPolicy: bloom.FilterPolicy(10)}
+	// opt2.Levels[2] = pebble.LevelOptions{TargetFileSize: fileSize, FilterPolicy: bloom.FilterPolicy(10)}
+	// opt2.Levels[3] = pebble.LevelOptions{TargetFileSize: fileSize, FilterPolicy: bloom.FilterPolicy(10)}
+	// opt2.Levels[4] = pebble.LevelOptions{TargetFileSize: fileSize, FilterPolicy: bloom.FilterPolicy(10)}
+	// opt2.Levels[5] = pebble.LevelOptions{TargetFileSize: fileSize, FilterPolicy: bloom.FilterPolicy(10)}
+	// opt2.Levels[6] = pebble.LevelOptions{TargetFileSize: fileSize, FilterPolicy: bloom.FilterPolicy(10)}
+	// fmt.Println("wal: ", opt.DisableWAL)
+
+	// opt2.BytesPerSync = 1024 * 1024 * 1024
+	// opt2.WALBytesPerSync = 1024 * 1024 * 1024
 	// innerDB2, err := leveldb.New(hddPath, cache, handles, namespace, readonly)
-	innerDB2, err := pebble.Open(hddPath, opt2)
+	innerDB2, err := pebble.Open(hddPath, opt)
 	if err != nil {
 		return nil, err
 	}
 	db.dbCold = innerDB2
 
-	fileForSkeleton, err := os.Create(fileNameForSkeleton)
-	if err != nil {
-		fmt.Printf("Failed to create file: %v\n", err)
-	}
-	db.fileForSkeleton = fileForSkeleton
+	// fileForSkeleton, err := os.Create(fileNameForSkeleton)
+	// if err != nil {
+	// 	fmt.Printf("Failed to create file: %v\n", err)
+	// }
+	// db.fileForSkeleton = fileForSkeleton
 
 	// db.skeletonMem = make(map[int][]byte)
 
@@ -817,6 +822,20 @@ type ARYFORMIG struct {
 	key   *[]byte
 	value *[]byte
 }
+
+func (d *Database) convertFileToMig(aryFile *[]*ARYFORFILE) *[]*ARYFORMIG {
+	ary := new([]*ARYFORMIG)
+	for _, putkey := range *aryFile {
+		key := skeletonHeaderKey(uint64(putkey.index))
+		*ary = append(*ary, &ARYFORMIG{key: &key, value: &putkey.value})
+	}
+	return ary
+}
+
+// type ARYFORMIG struct {
+// 	key   *[]byte
+// 	value *[]byte
+// }
 
 // Put inserts the given value into the batch for later committing.
 func (b *batch) Put(idx int, key, value []byte) error {
