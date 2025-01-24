@@ -21,7 +21,6 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
-	"os"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -52,7 +51,7 @@ const (
 	// leveldb database cannot keep up with requested writes.
 	degradationWarnInterval = time.Minute
 
-	fileNameForSkeleton = "/home/yhseo/nvme/ethereum/execution/data/geth/chaindata/ancient/chain/skeleton.txt"
+	// fileNameForSkeleton = "/home/yhseo/nvme/ethereum/execution/data/geth/chaindata/ancient/chain/skeleton.txt"
 	// fileNameForSkeleton = "/home/yhseo/nvme/ethereum/execution/data/geth/chaindata/ancient/skeleton.txt"
 	// prefetchNum = 1
 	// getMemBatchSize = 8192
@@ -598,33 +597,33 @@ func (d *Database) Has(idx int, key []byte) (bool, error) {
 // 	}
 // }
 
-func (d *Database) ReadSkeletonFromFile(i int) ([]byte, error) {
-	file, err := os.Open(fileNameForSkeleton)
-	if err != nil {
-		fmt.Printf("Failed to open file: %v\n", err)
-		return nil, err
-	}
-	offset := onDiskSkeletonSize * int64(i)
-	_, err = file.Seek(offset, 0)
-	if err != nil {
-		fmt.Printf("Failed to seek: %v\n", err)
-		return nil, err
-	}
-	var mystruct onDiskSkeletonHeader
-	err = binary.Read(file, binary.LittleEndian, &mystruct)
-	if err != nil {
-		fmt.Printf("Failed to read from file: %v\n", err)
-		return nil, err
-	}
-	if mystruct.DataLen == 0 {
-		fmt.Println("dataLen is 0")
-		temp := make([]byte, 0)
-		return temp, nil
-	}
-	ret := make([]byte, mystruct.DataLen)
-	copy(ret, mystruct.Data[:mystruct.DataLen])
-	return ret, nil
-}
+// func (d *Database) ReadSkeletonFromFile(i int) ([]byte, error) {
+// 	file, err := os.Open(fileNameForSkeleton)
+// 	if err != nil {
+// 		fmt.Printf("Failed to open file: %v\n", err)
+// 		return nil, err
+// 	}
+// 	offset := onDiskSkeletonSize * int64(i)
+// 	_, err = file.Seek(offset, 0)
+// 	if err != nil {
+// 		fmt.Printf("Failed to seek: %v\n", err)
+// 		return nil, err
+// 	}
+// 	var mystruct onDiskSkeletonHeader
+// 	err = binary.Read(file, binary.LittleEndian, &mystruct)
+// 	if err != nil {
+// 		fmt.Printf("Failed to read from file: %v\n", err)
+// 		return nil, err
+// 	}
+// 	if mystruct.DataLen == 0 {
+// 		fmt.Println("dataLen is 0")
+// 		temp := make([]byte, 0)
+// 		return temp, nil
+// 	}
+// 	ret := make([]byte, mystruct.DataLen)
+// 	copy(ret, mystruct.Data[:mystruct.DataLen])
+// 	return ret, nil
+// }
 
 // func (d *Database) getFromSkeletonMem(skeletonIdx int) ([]byte, bool, error) {
 // 	d.skeletonMemLock.RLock()
@@ -652,7 +651,7 @@ func (d *Database) Get(idx int, key []byte) ([]byte, error) {
 	if d.closed {
 		return nil, pebble.ErrClosed
 	}
-	skeletonIdx := idx / 100
+	// skeletonIdx := idx / 100
 
 	// if isGetFile(idx) {
 	// 	fmt.Println("get skeleton: ", skeletonIdx)
@@ -671,17 +670,17 @@ func (d *Database) Get(idx int, key []byte) ([]byte, error) {
 	dat, closer, err := d.dbHot.Get(key)
 	if err != nil {
 		if err == pebble.ErrNotFound {
-			if isGetFile(idx) {
-				// fmt.Println("key miss in hotdb & mem: ", skeletonIdx)
-				dat, err = d.ReadSkeletonFromFile(skeletonIdx)
-				if err == nil && dat != nil {
-					// fmt.Println("file hit: ", skeletonIdx)
-					ret := make([]byte, len(dat))
-					copy(ret, dat)
-					return ret, nil
-				}
-				return nil, err
-			}
+			// if isGetFile(idx) {
+			// 	// fmt.Println("key miss in hotdb & mem: ", skeletonIdx)
+			// 	dat, err = d.ReadSkeletonFromFile(skeletonIdx)
+			// 	if err == nil && dat != nil {
+			// 		// fmt.Println("file hit: ", skeletonIdx)
+			// 		ret := make([]byte, len(dat))
+			// 		copy(ret, dat)
+			// 		return ret, nil
+			// 	}
+			// 	return nil, err
+			// }
 			if isGetColdDB(idx) {
 				// dat, err = d.dbCold.Get(idx, key)
 				dat, closer, err = d.dbCold.Get(key)
