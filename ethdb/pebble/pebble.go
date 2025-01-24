@@ -59,7 +59,7 @@ const (
 	// skeletonMaxLen             = 1016
 	// onDiskSkeletonSize         = skeletonMaxLen + 8
 	// migrationSkeletonBatchSize = 64 * 1024
-	migrationBatchSize = 128 * 1024
+	// migrationBatchSize = 128 * 1024
 	// deleteBatchSize            = 1
 )
 
@@ -88,11 +88,11 @@ type Database struct {
 
 	levelsGauge []metrics.Gauge // Gauge for tracking the number of tables in levels
 
-	quitLock      sync.RWMutex    // Mutex protecting the quit channel and the closed flag
-	quitChan      chan chan error // Quit channel to stop the metrics collection before closing the database
-	migrationChan chan *[]*ARYFORMIG
-	closed        bool // keep track of whether we're Closed
-	kvCnt         atomic.Int64
+	quitLock sync.RWMutex    // Mutex protecting the quit channel and the closed flag
+	quitChan chan chan error // Quit channel to stop the metrics collection before closing the database
+	// migrationChan chan *[]*ARYFORMIG
+	closed bool // keep track of whether we're Closed
+	// kvCnt  atomic.Int64
 
 	log log.Logger // Contextual logger tracking the database path
 
@@ -324,10 +324,10 @@ func New(file string, cache int, handles int, namespace string, readonly bool, e
 		memTableSize = maxMemTableSize - 1
 	}
 	db := &Database{
-		fn:            file,
-		log:           logger,
-		quitChan:      make(chan chan error),
-		migrationChan: make(chan *[]*ARYFORMIG, 100000),
+		fn:       file,
+		log:      logger,
+		quitChan: make(chan chan error),
+		// migrationChan: make(chan *[]*ARYFORMIG, 100000),
 		// prefetchChan:       make(chan int, 100000),
 		// skeletonMigChan: make(chan int, 100000),
 		// deleteSkeletonChan: make(chan int, 100000),
@@ -438,56 +438,56 @@ func New(file string, cache int, handles int, namespace string, readonly bool, e
 	fmt.Printf("procs %d\n", runtime.GOMAXPROCS(0))
 	// Start up the metrics gathering and return
 	go db.meter(metricsGatheringInterval, namespace)
-	go db.migration()
+	// go db.migration()
 	// go db.prefetchSkeletonHeader()
 	// go db.skeletonMigration()
 	// go db.deleteSkeletonHeaderInMem()
 	return db, nil
 }
 
-func (d *Database) migration() error {
-	batchCold := &coldBatch{
-		b:  d.dbCold.NewBatch(),
-		db: d,
-	}
-	// batchCold := d.dbCold.NewBatch()
-	batchHot := d.dbHot.NewBatch()
-	defer batchHot.Close()
-	for {
-		select {
-		case putkeys := <-d.migrationChan:
-			for _, putkey := range *putkeys {
-				batchCold.PutCold(*putkey.key, *putkey.value)
-				if err := batchHot.Delete(*putkey.key, d.writeOptions); err != nil {
-					panic(err)
-				}
-			}
-			d.kvCnt.Add(int64(len(*putkeys)))
+// func (d *Database) migration() error {
+// 	batchCold := &coldBatch{
+// 		b:  d.dbCold.NewBatch(),
+// 		db: d,
+// 	}
+// 	// batchCold := d.dbCold.NewBatch()
+// 	batchHot := d.dbHot.NewBatch()
+// 	defer batchHot.Close()
+// 	for {
+// 		select {
+// 		case putkeys := <-d.migrationChan:
+// 			for _, putkey := range *putkeys {
+// 				batchCold.PutCold(*putkey.key, *putkey.value)
+// 				if err := batchHot.Delete(*putkey.key, d.writeOptions); err != nil {
+// 					panic(err)
+// 				}
+// 			}
+// 			d.kvCnt.Add(int64(len(*putkeys)))
 
-			if d.kvCnt.Load() >= migrationBatchSize {
-				d.kvCnt.Store(0)
-				if err := batchCold.b.Commit(d.writeOptionsCold); err != nil {
-					d.log.Error("ColdDB Put Commit failed", "err", err)
-				}
-				err := d.dbCold.Flush()
-				if err != nil {
-					d.log.Error("ColdDB Flush failed", "err", err)
-				}
-				if err := batchHot.Commit(d.writeOptions); err != nil {
-					d.log.Error("HotDB Delete Commit failed", "err", err)
-				}
-				batchCold = &coldBatch{
-					b:  d.dbCold.NewBatch(),
-					db: d,
-				}
-				// batchCold = d.dbCold.NewBatch()
-				batchHot = d.dbHot.NewBatch()
-			}
-		case <-d.quitChan:
-			return nil
-		}
-	}
-}
+// 			if d.kvCnt.Load() >= migrationBatchSize {
+// 				d.kvCnt.Store(0)
+// 				if err := batchCold.b.Commit(d.writeOptionsCold); err != nil {
+// 					d.log.Error("ColdDB Put Commit failed", "err", err)
+// 				}
+// 				err := d.dbCold.Flush()
+// 				if err != nil {
+// 					d.log.Error("ColdDB Flush failed", "err", err)
+// 				}
+// 				if err := batchHot.Commit(d.writeOptions); err != nil {
+// 					d.log.Error("HotDB Delete Commit failed", "err", err)
+// 				}
+// 				batchCold = &coldBatch{
+// 					b:  d.dbCold.NewBatch(),
+// 					db: d,
+// 				}
+// 				// batchCold = d.dbCold.NewBatch()
+// 				batchHot = d.dbHot.NewBatch()
+// 			}
+// 		case <-d.quitChan:
+// 			return nil
+// 		}
+// 	}
+// }
 
 func (b *coldBatch) PutCold(key, value []byte) error {
 	b.b.Set(key, value, nil)
@@ -839,14 +839,15 @@ type ARYFORMIG struct {
 func (b *batch) Put(idx int, key, value []byte) error {
 	if isPutColdDB(idx) {
 		b.putkeys = append(b.putkeys, &ARYFORMIG{key: &key, value: &value})
+	} else {
+		b.b.Set(key, value, nil)
 	}
-
+	b.size += len(key) + len(value)
 	// if isPutFile(idx) {
 	// 	// fmt.Println("bput skeleton: ", len(value), idx/100)
 	// 	b.skkeys = append(b.skkeys, &ARYFORSK{key: &key, value: &value, idx: idx})
 	// }
-	b.b.Set(key, value, nil)
-	b.size += len(key) + len(value)
+
 	return nil
 }
 
@@ -859,7 +860,17 @@ func (b *batch) Write() error {
 	}
 	res := b.b.Commit(b.db.writeOptions)
 	if len(b.putkeys) > 0 {
-		b.db.migrationChan <- &b.putkeys
+		batchCold := &coldBatch{
+			b:  b.db.dbCold.NewBatch(),
+			db: b.db,
+		}
+		for _, putkey := range b.putkeys {
+			batchCold.PutCold(*putkey.key, *putkey.value)
+		}
+		if err := batchCold.b.Commit(b.db.writeOptionsCold); err != nil {
+			b.db.log.Error("ColdDB Put Commit failed", "err", err)
+		}
+		// b.db.migrationChan <- &b.putkeys
 		// go b.db.migrationNew(&b.putkeys)
 	}
 
