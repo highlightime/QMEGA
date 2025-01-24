@@ -123,10 +123,10 @@ type Database struct {
 	// isStartedPrefetch   atomic.Bool
 }
 
-type onDiskSkeletonHeader struct {
-	DataLen uint64
-	Data    [skeletonMaxLen]byte
-}
+// type onDiskSkeletonHeader struct {
+// 	DataLen uint64
+// 	Data    [skeletonMaxLen]byte
+// }
 
 type ARYFORFILE struct {
 	index int64
@@ -1295,6 +1295,7 @@ func isPutColdDB(idx int) bool {
 func isGetColdDB(idx int) bool {
 	var trieIdx = []int{54, 55, 56}
 	var snapshotIdx = []int{39, 40, 41, 42, 43, 44}
+	var skeletonIdx = 52
 	for _, i := range trieIdx {
 		if i == idx {
 			return true
@@ -1305,18 +1306,18 @@ func isGetColdDB(idx int) bool {
 			return true
 		}
 	}
-	return false
+	return skeletonIdx == idx%100
 }
 
-func isGetFile(idx int) bool {
-	var skeletonIdx = []int{52}
-	for _, i := range skeletonIdx {
-		if i == idx%100 && idx/100 != 1 {
-			return true
-		}
-	}
-	return false
-}
+// func isGetFile(idx int) bool {
+// 	var skeletonIdx = []int{52}
+// 	for _, i := range skeletonIdx {
+// 		if i == idx%100 && idx/100 != 1 {
+// 			return true
+// 		}
+// 	}
+// 	return false
+// }
 
 func isHasHDD(idx int) bool {
 	var trieIdx = []int{7, 8, 9}
@@ -1334,9 +1335,9 @@ func encodeBlockNumber(number uint64) []byte {
 	return enc
 }
 
-func decodeBlockNumber(enc []byte) uint64 {
-	return binary.BigEndian.Uint64(enc)
-}
+// func decodeBlockNumber(enc []byte) uint64 {
+// 	return binary.BigEndian.Uint64(enc)
+// }
 
 // func keySkeletonHeader(key []byte) uint64 {
 // 	return decodeBlockNumber(key[1:])
