@@ -99,7 +99,7 @@ func (st *insertStats) report(chain []*types.Block, index int, snapDiffItems, sn
 			// 	fmt.Println(out.String())
 			// 	os.Exit(0)
 			// }
-			if end.Number().Uint64() > 1000000 {
+			if end.Number().Uint64() > 2000000 {
 				cmd := exec.Command("df")
 				var out bytes.Buffer
 				cmd.Stdout = &out
