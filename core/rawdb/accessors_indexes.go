@@ -63,7 +63,7 @@ func ReadTxLookupEntry(db ethdb.Reader, hash common.Hash) *uint64 {
 // writeTxLookupEntry stores a positional metadata for a transaction,
 // enabling hash based transaction and receipt lookups.
 func writeTxLookupEntry(db ethdb.KeyValueWriter, hash common.Hash, numberBytes []byte) {
-	if err := db.Put(txLookupKey(hash), numberBytes); err != nil {
+	if err := db.Put(29, txLookupKey(hash), numberBytes); err != nil {
 		log.Crit("Failed to store transaction lookup entry", "err", err)
 	}
 }
@@ -180,19 +180,17 @@ func ReadReceipt(db ethdb.Reader, hash common.Hash, config *params.ChainConfig) 
 	return nil, common.Hash{}, 0, 0
 }
 
-// ReadFilterMapRow retrieves a filter map row at the given mapRowIndex
-// (see filtermaps.mapRowIndex for the storage index encoding).
-// Note that zero length rows are not stored in the database and therefore all
-// non-existent entries are interpreted as empty rows and return no error.
-// Also note that the mapRowIndex indexing scheme is the same as the one
-// proposed in EIP-7745 for tree-hashing the filter map structure and for the
-// same data proximity reasons it is also suitable for database representation.
-// See also:
-// https://eips.ethereum.org/EIPS/eip-7745#hash-tree-structure
-func ReadFilterMapExtRow(db ethdb.KeyValueReader, mapRowIndex uint64, bitLength uint) ([]uint32, error) {
-	byteLength := int(bitLength) / 8
-	if int(bitLength) != byteLength*8 {
-		panic("invalid bit length")
+// ReadBloomBits retrieves the compressed bloom bit vector belonging to the given
+// section and bit index from the.
+func ReadBloomBits(db ethdb.KeyValueReader, bit uint, section uint64, head common.Hash) ([]byte, error) {
+	return db.Get(17, bloomBitsKey(bit, section, head))
+}
+
+// WriteBloomBits stores the compressed bloom bits vector belonging to the given
+// section and bit index.
+func WriteBloomBits(db ethdb.KeyValueWriter, bit uint, section uint64, head common.Hash, bits []byte) {
+	if err := db.Put(17, bloomBitsKey(bit, section, head), bits); err != nil {
+		log.Crit("Failed to store bloom bits", "err", err)
 	}
 	key := filterMapRowKey(mapRowIndex, false)
 	has, err := db.Has(key)

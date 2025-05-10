@@ -422,7 +422,7 @@ func extractGenesis(db ethdb.Database, stateBloom *stateBloom) error {
 
 		// Embedded nodes don't have hash.
 		if hash != (common.Hash{}) {
-			stateBloom.Put(hash.Bytes(), nil)
+			stateBloom.Put(45, hash.Bytes(), nil)
 		}
 		// If it's a leaf node, yes we are touching an account,
 		// dig into the storage trie further.
@@ -444,7 +444,7 @@ func extractGenesis(db ethdb.Database, stateBloom *stateBloom) error {
 				for storageIter.Next(true) {
 					hash := storageIter.Hash()
 					if hash != (common.Hash{}) {
-						stateBloom.Put(hash.Bytes(), nil)
+						stateBloom.Put(45, hash.Bytes(), nil)
 					}
 				}
 				if storageIter.Error() != nil {
@@ -452,7 +452,7 @@ func extractGenesis(db ethdb.Database, stateBloom *stateBloom) error {
 				}
 			}
 			if !bytes.Equal(acc.CodeHash, types.EmptyCodeHash.Bytes()) {
-				stateBloom.Put(acc.CodeHash, nil)
+				stateBloom.Put(45, acc.CodeHash, nil)
 			}
 		}
 	}
