@@ -34,7 +34,7 @@ type Database struct {
 
 func (db *Database) Has(key []byte) (bool, error) {
 	if _, err := db.Get(key); err != nil {
-		return false, nil
+		return false, err
 	}
 	return true, nil
 }
@@ -50,7 +50,7 @@ func (db *Database) Get(key []byte) ([]byte, error) {
 
 func (db *Database) HasAncient(kind string, number uint64) (bool, error) {
 	if _, err := db.Ancient(kind, number); err != nil {
-		return false, nil
+		return false, err
 	}
 	return true, nil
 }
@@ -94,6 +94,10 @@ func (db *Database) Delete(key []byte) error {
 	panic("not supported")
 }
 
+func (db *Database) DeleteRange(start, end []byte) error {
+	panic("not supported")
+}
+
 func (db *Database) ModifyAncients(f func(ethdb.AncientWriteOp) error) (int64, error) {
 	panic("not supported")
 }
@@ -106,12 +110,8 @@ func (db *Database) TruncateTail(n uint64) (uint64, error) {
 	panic("not supported")
 }
 
-func (db *Database) Sync() error {
+func (db *Database) SyncAncient() error {
 	return nil
-}
-
-func (db *Database) MigrateTable(s string, f func([]byte) ([]byte, error)) error {
-	panic("not supported")
 }
 
 func (db *Database) NewBatch() ethdb.Batch {
@@ -138,8 +138,8 @@ func (db *Database) Compact(start []byte, limit []byte) error {
 	return nil
 }
 
-func (db *Database) NewSnapshot() (ethdb.Snapshot, error) {
-	panic("not supported")
+func (db *Database) SyncKeyValue() error {
+	return nil
 }
 
 func (db *Database) Close() error {
@@ -148,7 +148,8 @@ func (db *Database) Close() error {
 }
 
 func New(client *rpc.Client) ethdb.Database {
-	return &Database{
-		remote: client,
+	if client == nil {
+		return nil
 	}
+	return &Database{remote: client}
 }

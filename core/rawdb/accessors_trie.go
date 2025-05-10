@@ -1,4 +1,4 @@
-// Copyright 2022 The go-ethereum Authors
+// Copyright 2023 The go-ethereum Authors
 // This file is part of the go-ethereum library.
 //
 // The go-ethereum library is free software: you can redistribute it and/or modify
@@ -12,13 +12,12 @@
 // GNU Lesser General Public License for more details.
 //
 // You should have received a copy of the GNU Lesser General Public License
-// along with the go-ethereum library. If not, see <http://www.gnu.org/licenses/>
+// along with the go-ethereum library. If not, see <http://www.gnu.org/licenses/>.
 
 package rawdb
 
 import (
 	"fmt"
-	"sync"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
@@ -44,25 +43,6 @@ const HashScheme = "hash"
 // area of the disk with good data locality property. But this scheme needs to rely
 // on extra state diffs to survive deep reorg.
 const PathScheme = "path"
-
-// hasher is used to compute the sha256 hash of the provided data.
-type hasher struct{ sha crypto.KeccakState }
-
-var hasherPool = sync.Pool{
-	New: func() interface{} { return &hasher{sha: crypto.NewKeccakState()} },
-}
-
-func newHasher() *hasher {
-	return hasherPool.Get().(*hasher)
-}
-
-func (h *hasher) hash(data []byte) common.Hash {
-	return crypto.HashData(h.sha, data)
-}
-
-func (h *hasher) release() {
-	hasherPool.Put(h)
-}
 
 // ReadAccountTrieNode retrieves the account trie node with the specified node path.
 func ReadAccountTrieNode(db ethdb.KeyValueReader, path []byte) []byte {
@@ -170,9 +150,7 @@ func HasTrieNode(db ethdb.KeyValueReader, owner common.Hash, path []byte, hash c
 		if len(blob) == 0 {
 			return false
 		}
-		h := newHasher()
-		defer h.release()
-		return h.hash(blob) == hash // exists but not match
+		return crypto.Keccak256Hash(blob) == hash // exists but not match
 	default:
 		panic(fmt.Sprintf("Unknown scheme %v", scheme))
 	}
@@ -194,9 +172,7 @@ func ReadTrieNode(db ethdb.KeyValueReader, owner common.Hash, path []byte, hash 
 		if len(blob) == 0 {
 			return nil
 		}
-		h := newHasher()
-		defer h.release()
-		if h.hash(blob) != hash {
+		if crypto.Keccak256Hash(blob) != hash {
 			return nil // exists but not match
 		}
 		return blob
@@ -245,7 +221,7 @@ func DeleteTrieNode(db ethdb.KeyValueWriter, owner common.Hash, path []byte, has
 
 // ReadStateScheme reads the state scheme of persistent state, or none
 // if the state is not present in database.
-func ReadStateScheme(db ethdb.Reader) string {
+func ReadStateScheme(db ethdb.Database) string {
 	// Check if state in path-based scheme is present.
 	if HasAccountTrieNode(db, nil) {
 		return PathScheme
@@ -253,6 +229,16 @@ func ReadStateScheme(db ethdb.Reader) string {
 	// The root node might be deleted during the initial snap sync, check
 	// the persistent state id then.
 	if id := ReadPersistentStateID(db); id != 0 {
+		return PathScheme
+	}
+	// Check if verkle state in path-based scheme is present.
+	vdb := NewTable(db, string(VerklePrefix))
+	if HasAccountTrieNode(vdb, nil) {
+		return PathScheme
+	}
+	// The root node of verkle might be deleted during the initial snap sync,
+	// check the persistent state id then.
+	if id := ReadPersistentStateID(vdb); id != 0 {
 		return PathScheme
 	}
 	// In a hash-based scheme, the genesis state is consistently stored
@@ -291,6 +277,10 @@ func ParseStateScheme(provided string, disk ethdb.Database) (string, error) {
 		}
 		log.Info("State scheme set to already existing", "scheme", stored)
 		return stored, nil // reuse scheme of persistent scheme
+	}
+	// If state scheme is specified, ensure it's valid.
+	if provided != HashScheme && provided != PathScheme {
+		return "", fmt.Errorf("invalid state scheme %s", provided)
 	}
 	// If state scheme is specified, ensure it's compatible with
 	// persistent state.

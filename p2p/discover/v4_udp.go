@@ -210,12 +210,6 @@ func (t *UDPv4) ourEndpoint() v4wire.Endpoint {
 	return v4wire.NewEndpoint(addr, uint16(node.TCP()))
 }
 
-// Ping sends a ping message to the given node.
-func (t *UDPv4) Ping(n *enode.Node) error {
-	_, err := t.ping(n)
-	return err
-}
-
 // ping sends a ping message to the given node and waits for a reply.
 func (t *UDPv4) ping(n *enode.Node) (seq uint64, err error) {
 	addr, ok := n.UDPEndpoint()
@@ -227,6 +221,19 @@ func (t *UDPv4) ping(n *enode.Node) (seq uint64, err error) {
 		seq = rm.reply.(*v4wire.Pong).ENRSeq
 	}
 	return seq, err
+}
+
+// Ping calls PING on a node and waits for a PONG response.
+func (t *UDPv4) Ping(n *enode.Node) (pong *v4wire.Pong, err error) {
+	addr, ok := n.UDPEndpoint()
+	if !ok {
+		return nil, errNoUDPEndpoint
+	}
+	rm := t.sendPing(n.ID(), addr, nil)
+	if err = <-rm.errc; err == nil {
+		pong = rm.reply.(*v4wire.Pong)
+	}
+	return pong, err
 }
 
 // sendPing sends a ping message to the given node and invokes the callback
@@ -271,7 +278,7 @@ func (t *UDPv4) LookupPubkey(key *ecdsa.PublicKey) []*enode.Node {
 		// case and run the bootstrapping logic.
 		<-t.tab.refresh()
 	}
-	return t.newLookup(t.closeCtx, encodePubkey(key)).run()
+	return t.newLookup(t.closeCtx, v4wire.EncodePubkey(key)).run()
 }
 
 // RandomNodes is an iterator yielding nodes from a random walk of the DHT.
@@ -286,24 +293,24 @@ func (t *UDPv4) lookupRandom() []*enode.Node {
 
 // lookupSelf implements transport.
 func (t *UDPv4) lookupSelf() []*enode.Node {
-	return t.newLookup(t.closeCtx, encodePubkey(&t.priv.PublicKey)).run()
+	pubkey := v4wire.EncodePubkey(&t.priv.PublicKey)
+	return t.newLookup(t.closeCtx, pubkey).run()
 }
 
 func (t *UDPv4) newRandomLookup(ctx context.Context) *lookup {
-	var target encPubkey
+	var target v4wire.Pubkey
 	crand.Read(target[:])
 	return t.newLookup(ctx, target)
 }
 
-func (t *UDPv4) newLookup(ctx context.Context, targetKey encPubkey) *lookup {
+func (t *UDPv4) newLookup(ctx context.Context, targetKey v4wire.Pubkey) *lookup {
 	target := enode.ID(crypto.Keccak256Hash(targetKey[:]))
-	ekey := v4wire.Pubkey(targetKey)
 	it := newLookup(ctx, t.tab, target, func(n *enode.Node) ([]*enode.Node, error) {
 		addr, ok := n.UDPEndpoint()
 		if !ok {
 			return nil, errNoUDPEndpoint
 		}
-		return t.findnode(n.ID(), addr, ekey)
+		return t.findnode(n.ID(), addr, targetKey)
 	})
 	return it
 }
@@ -547,7 +554,9 @@ func (t *UDPv4) readLoop(unhandled chan<- ReadPacket) {
 			}
 			return
 		}
-		if t.handlePacket(from, buf[:nbytes]) != nil && unhandled != nil {
+		if err := t.handlePacket(from, buf[:nbytes]); err != nil && unhandled == nil {
+			t.log.Debug("Bad discv4 packet", "addr", from, "err", err)
+		} else if err != nil && unhandled != nil {
 			select {
 			case unhandled <- ReadPacket{buf[:nbytes], from}:
 			default:
@@ -564,7 +573,6 @@ func (t *UDPv4) handlePacket(from netip.AddrPort, buf []byte) error {
 
 	rawpacket, fromKey, hash, err := v4wire.Decode(buf)
 	if err != nil {
-		t.log.Debug("Bad discv4 packet", "addr", from, "err", err)
 		return err
 	}
 	packet := t.wrapPacket(rawpacket)
@@ -745,7 +753,8 @@ func (t *UDPv4) handleFindnode(h *packetHandlerV4, from netip.AddrPort, fromID e
 
 	// Determine closest nodes.
 	target := enode.ID(crypto.Keccak256Hash(req.Target[:]))
-	closest := t.tab.findnodeByID(target, bucketSize, true).entries
+	preferLive := !t.tab.cfg.NoFindnodeLivenessCheck
+	closest := t.tab.findnodeByID(target, bucketSize, preferLive).entries
 
 	// Send neighbors in chunks with at most maxNeighbors per packet
 	// to stay below the packet size limit.
