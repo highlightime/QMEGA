@@ -82,7 +82,7 @@ func (cs *canonicalStore[T]) add(backend ethdb.KeyValueWriter, period uint64, va
 	if err != nil {
 		return err
 	}
-	if err := backend.Put(44, cs.databaseKey(period), enc); err != nil {
+	if err := backend.Put(42, cs.databaseKey(period), enc); err != nil {
 		return err
 	}
 	cs.cache.Add(period, value)
@@ -111,7 +111,7 @@ func (cs *canonicalStore[T]) get(backend ethdb.KeyValueReader, period uint64) (T
 	if value, ok := cs.cache.Get(period); ok {
 		return value, true
 	}
-	enc, err := backend.Get(60, cs.databaseKey(period))
+	enc, err := backend.Get(42, cs.databaseKey(period))
 	if err != nil {
 		log.Error("Canonical store value not found", "period", period, "start", cs.periods.Start, "end", cs.periods.End)
 		return null, false

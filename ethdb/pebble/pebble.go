@@ -20,9 +20,11 @@ package pebble
 import (
 	"bytes"
 	"encoding/binary"
+	"encoding/csv"
 	"fmt"
 	"os"
 	"runtime"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -59,7 +61,16 @@ const (
 	onDiskSkeletonSize         = skeletonMaxLen + 8
 	migrationSkeletonBatchSize = 64 * 1024
 	migrationBatchSize         = 128 * 1024
+	statFile                   = "/home/yhseo/nvme/stat.csv"
 )
+
+type IndexStats struct {
+	PutCount  int
+	GetCount  int
+	TotalSize int64
+	LastPut   int64
+	LastGet   int64
+}
 
 // Database is a persistent key-value store based on the pebble storage engine.
 // Apart from basic data storage functionality it also supports batch writes and
@@ -87,6 +98,7 @@ type Database struct {
 
 	quitLock      sync.RWMutex    // Mutex protecting the quit channel and the closed flag
 	quitChan      chan chan error // Quit channel to stop the metrics collection before closing the database
+	statLock      sync.RWMutex    // Mutex protecting the stats map
 	migrationChan chan *[]*ARYFORMIG
 	closed        bool // keep track of whether we're Closed
 	kvCnt         atomic.Int64
@@ -113,6 +125,7 @@ type Database struct {
 	migrationStopped    int
 	fileForSkeleton     *os.File
 	isMigratingSkeleton atomic.Bool
+	stats               map[int]*IndexStats
 }
 
 type onDiskSkeletonHeader struct {
@@ -123,6 +136,69 @@ type onDiskSkeletonHeader struct {
 type ARYFORFILE struct {
 	index int64
 	value []byte
+}
+
+// 현재 stats를 출력하는 함수
+// func (d *Database) printStats() {
+// 	d.statLock.RLock()
+// 	defer d.statLock.RUnlock()
+
+// 	fmt.Println("=== Database Stats ===")
+// 	for idx, stat := range d.stats {
+// 		fmt.Printf("Idx: %d, GetCount: %d, PutCount: %d, TotalSize: %d bytes, LastGet: %d, LastPut: %d\n",
+// 			idx, stat.GetCount, stat.PutCount, stat.TotalSize, stat.LastGet, stat.LastPut)
+// 	}
+// 	fmt.Println("=======================")
+// }
+
+// // 1분마다 함수를 호출하는 루프 (blocking)
+// func (d *Database) startFuncLoop() {
+// 	ticker := time.NewTicker(1 * time.Minute)
+// 	defer ticker.Stop() // 종료될 때 리소스 정리
+
+//		for range ticker.C {
+//			d.printStats()
+//		}
+//	}
+
+func (d *Database) dumpStatsToWriter(writer *csv.Writer) {
+	d.statLock.RLock()
+	defer d.statLock.RUnlock()
+
+	now := time.Now().Unix()
+
+	for idx, stat := range d.stats {
+		writer.Write([]string{
+			strconv.FormatInt(now, 10),
+			strconv.Itoa(idx),
+			strconv.Itoa(stat.PutCount),
+			strconv.Itoa(stat.GetCount),
+			strconv.FormatInt(stat.TotalSize, 10),
+			strconv.FormatInt(stat.LastPut, 10),
+			strconv.FormatInt(stat.LastGet, 10),
+		})
+	}
+}
+
+func (d *Database) startFuncLoop() {
+	f, err := os.Create(statFile)
+	if err != nil {
+		fmt.Println("Failed to create stats file:", err)
+	}
+	defer f.Close()
+
+	writer := csv.NewWriter(f)
+	defer writer.Flush()
+
+	writer.Write([]string{"Cut", "Idx", "PutCnt", "GetCnt", "TotalSize", "LastPut", "LastGet"})
+
+	ticker := time.NewTicker(1 * time.Minute)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		d.dumpStatsToWriter(writer)
+		writer.Flush()
+	}
 }
 
 func (d *Database) WriteSkeletonHeaderToFile(ary *[]*ARYFORFILE) {
@@ -358,6 +434,7 @@ func New(file string, cache int, handles int, namespace string, readonly bool, e
 	opt2.MemTableSize = uint64(fileSize)
 	cacheList, _ := lru.New(1000000)
 	db.bufferedList = cacheList
+	db.stats = make(map[int]*IndexStats)
 
 	opt2.Levels[0] = pebble.LevelOptions{TargetFileSize: fileSize, FilterPolicy: bloom.FilterPolicy(10)}
 	opt2.Levels[1] = pebble.LevelOptions{TargetFileSize: fileSize, FilterPolicy: bloom.FilterPolicy(10)}
@@ -400,6 +477,7 @@ func New(file string, cache int, handles int, namespace string, readonly bool, e
 	go db.meter(metricsGatheringInterval, namespace)
 	go db.migration()
 	go db.skeletonMigration()
+	go db.startFuncLoop()
 	return db, nil
 }
 
@@ -530,6 +608,17 @@ func (d *Database) Get(idx int, key []byte) ([]byte, error) {
 	}
 
 	skeletonIdx := idx / 100
+	statIdx := idx % 100
+
+	d.statLock.RLock()
+	defer d.statLock.RUnlock()
+	stat, exists := d.stats[statIdx]
+	if !exists {
+		stat = &IndexStats{}
+		d.stats[statIdx] = stat
+	}
+	stat.GetCount++
+	stat.LastGet = time.Now().Unix()
 
 	dat, closer, err := d.dbHot.Get(key)
 	if err != nil {
@@ -539,6 +628,7 @@ func (d *Database) Get(idx int, key []byte) ([]byte, error) {
 				if err == nil && dat != nil {
 					ret := make([]byte, len(dat))
 					copy(ret, dat)
+					stat.TotalSize += int64(len(key) + len(ret))
 					return ret, nil
 				}
 				return nil, err
@@ -548,6 +638,7 @@ func (d *Database) Get(idx int, key []byte) ([]byte, error) {
 					if ret, ok := val.([]byte); ok {
 						result := make([]byte, len(ret))
 						copy(result, ret)
+						stat.TotalSize += int64(len(key) + len(result))
 						return result, nil
 					}
 				}
@@ -556,6 +647,7 @@ func (d *Database) Get(idx int, key []byte) ([]byte, error) {
 					ret := make([]byte, len(dat))
 					copy(ret, dat)
 					d.bufferedList.Add(string(key), ret)
+					stat.TotalSize += int64(len(key) + len(ret))
 					defer closer.Close()
 					return ret, nil
 				}
@@ -566,6 +658,7 @@ func (d *Database) Get(idx int, key []byte) ([]byte, error) {
 	}
 	ret := make([]byte, len(dat))
 	copy(ret, dat)
+	stat.TotalSize += int64(len(key) + len(ret))
 	defer closer.Close()
 	return ret, nil
 }
@@ -701,7 +794,19 @@ func (b *batch) Put(idx int, key, value []byte) error {
 		b.skkeys = append(b.skkeys, &ARYFORSK{key: &key, value: &value, idx: idx})
 	}
 	b.b.Set(key, value, nil)
-	b.size += len(key) + len(value)
+	SizeKV := len(key) + len(value)
+	b.size += SizeKV
+	statIdx := idx % 100
+	b.db.statLock.RLock()
+	defer b.db.statLock.RUnlock()
+	stat, exists := b.db.stats[statIdx]
+	if !exists {
+		stat = &IndexStats{}
+		b.db.stats[statIdx] = stat
+	}
+	stat.PutCount++
+	stat.LastPut = time.Now().Unix()
+	stat.TotalSize += int64(SizeKV)
 	return nil
 }
 
@@ -1112,7 +1217,7 @@ func (l panicLogger) Fatalf(format string, args ...interface{}) {
 }
 
 func isPutFile(idx int) bool {
-	var skeletonIdx = []int{37, 38}
+	var skeletonIdx = []int{61, 62}
 	for _, i := range skeletonIdx {
 		if i == idx%100 {
 			return true
@@ -1122,8 +1227,8 @@ func isPutFile(idx int) bool {
 }
 
 func isPutColdDB(idx int) bool {
-	var trieIdx = []int{40, 41, 42}
-	var snapshotIdx = []int{27, 28, 29, 30, 31, 32}
+	var trieIdx = []int{50, 51, 52}
+	var snapshotIdx = []int{20, 21, 22, 23, 24, 25, 26, 37}
 	for _, i := range trieIdx {
 		if i == idx {
 			return true
@@ -1138,8 +1243,8 @@ func isPutColdDB(idx int) bool {
 }
 
 func isGetColdDB(idx int) bool {
-	var trieIdx = []int{54, 55, 56}
-	var snapshotIdx = []int{39, 40, 41, 42, 43, 44}
+	var trieIdx = []int{50, 51, 52}
+	var snapshotIdx = []int{20, 21, 22, 23, 24, 25, 26, 37}
 	for _, i := range trieIdx {
 		if i == idx {
 			return true
@@ -1154,7 +1259,7 @@ func isGetColdDB(idx int) bool {
 }
 
 func isGetFile(idx int) bool {
-	var skeletonIdx = []int{52}
+	var skeletonIdx = []int{62}
 	for _, i := range skeletonIdx {
 		if i == idx%100 && idx/100 != 1 {
 			return true
@@ -1164,7 +1269,7 @@ func isGetFile(idx int) bool {
 }
 
 func isHasHDD(idx int) bool {
-	var trieIdx = []int{7, 8, 9}
+	var trieIdx = []int{50, 51, 52}
 	for _, i := range trieIdx {
 		if i == idx {
 			return true

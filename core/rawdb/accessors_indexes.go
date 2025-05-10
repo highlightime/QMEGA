@@ -56,7 +56,7 @@ func ReadTxLookupEntry(db ethdb.Reader, hash common.Hash) *uint64 {
 // writeTxLookupEntry stores a positional metadata for a transaction,
 // enabling hash based transaction and receipt lookups.
 func writeTxLookupEntry(db ethdb.KeyValueWriter, hash common.Hash, numberBytes []byte) {
-	if err := db.Put(16, txLookupKey(hash), numberBytes); err != nil {
+	if err := db.Put(29, txLookupKey(hash), numberBytes); err != nil {
 		log.Crit("Failed to store transaction lookup entry", "err", err)
 	}
 }
@@ -148,7 +148,7 @@ func ReadReceipt(db ethdb.Reader, hash common.Hash, config *params.ChainConfig) 
 // ReadBloomBits retrieves the compressed bloom bit vector belonging to the given
 // section and bit index from the.
 func ReadBloomBits(db ethdb.KeyValueReader, bit uint, section uint64, head common.Hash) ([]byte, error) {
-	return db.Get(30, bloomBitsKey(bit, section, head))
+	return db.Get(17, bloomBitsKey(bit, section, head))
 }
 
 // WriteBloomBits stores the compressed bloom bits vector belonging to the given

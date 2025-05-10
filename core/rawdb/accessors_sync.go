@@ -25,14 +25,14 @@ import (
 
 // ReadSkeletonSyncStatus retrieves the serialized sync status saved at shutdown.
 func ReadSkeletonSyncStatus(db ethdb.KeyValueReader) []byte {
-	data, _ := db.Get(51, skeletonSyncStatusKey)
+	data, _ := db.Get(61, skeletonSyncStatusKey)
 	return data
 }
 
 // WriteSkeletonSyncStatus stores the serialized sync status to save at shutdown.
 func WriteSkeletonSyncStatus(db ethdb.KeyValueWriter, status []byte, finalized int) {
 	// fmt.Printf("write skeleton sync status: %d\n", finalized)
-	if err := db.Put(37+finalized*100, skeletonSyncStatusKey, status); err != nil {
+	if err := db.Put(61+finalized*100, skeletonSyncStatusKey, status); err != nil {
 		log.Crit("Failed to store skeleton sync status", "err", err)
 	}
 }
@@ -48,7 +48,7 @@ func DeleteSkeletonSyncStatus(db ethdb.KeyValueWriter) {
 // ReadSkeletonHeader retrieves a block header from the skeleton sync store,
 func ReadSkeletonHeader(idx int, db ethdb.KeyValueReader, number uint64) *types.Header {
 	// fmt.Printf("rs: %d i: %d\n", number, idx)
-	data, _ := db.Get(52+100*int(number), skeletonHeaderKey(number))
+	data, _ := db.Get(62+100*int(number), skeletonHeaderKey(number))
 	if len(data) == 0 {
 		return nil
 	}
@@ -70,7 +70,7 @@ func WriteSkeletonHeader(db ethdb.KeyValueWriter, header *types.Header) {
 	}
 	// fmt.Printf("sk: %d\n", len(data))
 	key := skeletonHeaderKey(header.Number.Uint64())
-	if err := db.Put(38+skeleton_idx*100, key, data); err != nil {
+	if err := db.Put(62+skeleton_idx*100, key, data); err != nil {
 		log.Crit("Failed to store skeleton header", "err", err)
 	}
 }
@@ -90,7 +90,7 @@ const (
 
 // ReadSnapSyncStatusFlag retrieves the state snap sync status flag.
 func ReadSnapSyncStatusFlag(db ethdb.KeyValueReader) uint8 {
-	blob, err := db.Get(53, snapSyncStatusFlagKey)
+	blob, err := db.Get(60, snapSyncStatusFlagKey)
 	if err != nil || len(blob) != 1 {
 		return StateSyncUnknown
 	}
@@ -99,7 +99,7 @@ func ReadSnapSyncStatusFlag(db ethdb.KeyValueReader) uint8 {
 
 // WriteSnapSyncStatusFlag stores the state snap sync status flag into database.
 func WriteSnapSyncStatusFlag(db ethdb.KeyValueWriter, flag uint8) {
-	if err := db.Put(39, snapSyncStatusFlagKey, []byte{flag}); err != nil {
+	if err := db.Put(60, snapSyncStatusFlagKey, []byte{flag}); err != nil {
 		log.Crit("Failed to store sync status flag", "err", err)
 	}
 }
