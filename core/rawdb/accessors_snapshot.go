@@ -57,7 +57,7 @@ func ReadSnapshotRoot(db ethdb.KeyValueReader) common.Hash {
 // WriteSnapshotRoot stores the root of the block whose state is contained in
 // the persisted snapshot.
 func WriteSnapshotRoot(db ethdb.KeyValueWriter, root common.Hash) {
-	if err := db.Put(SnapshotRootKey, root[:]); err != nil {
+	if err := db.Put(26, SnapshotRootKey, root[:]); err != nil {
 		log.Crit("Failed to store snapshot root", "err", err)
 	}
 }
@@ -80,7 +80,7 @@ func ReadAccountSnapshot(db ethdb.KeyValueReader, hash common.Hash) []byte {
 
 // WriteAccountSnapshot stores the snapshot entry of an account trie leaf.
 func WriteAccountSnapshot(db ethdb.KeyValueWriter, hash common.Hash, entry []byte) {
-	if err := db.Put(accountSnapshotKey(hash), entry); err != nil {
+	if err := db.Put(27, accountSnapshotKey(hash), entry); err != nil {
 		log.Crit("Failed to store account snapshot", "err", err)
 	}
 }

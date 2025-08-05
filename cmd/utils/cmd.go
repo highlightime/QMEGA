@@ -745,7 +745,7 @@ func ImportLDBData(db ethdb.Database, f string, startIndex int64, interrupt chan
 		case OpBatchDel:
 			batch.Delete(key)
 		case OpBatchAdd:
-			batch.Put(key, val)
+			batch.Put(99, key, val)
 		default:
 			return fmt.Errorf("unknown op %d", op)
 		}

@@ -48,7 +48,7 @@ func WriteDatabaseVersion(db ethdb.KeyValueWriter, version uint64) {
 	if err != nil {
 		log.Crit("Failed to encode database version", "err", err)
 	}
-	if err = db.Put(databaseVersionKey, enc); err != nil {
+	if err = db.Put(18, databaseVersionKey, enc); err != nil {
 		log.Crit("Failed to store the database version", "err", err)
 	}
 }
@@ -76,7 +76,7 @@ func WriteChainConfig(db ethdb.KeyValueWriter, hash common.Hash, cfg *params.Cha
 	if err != nil {
 		log.Crit("Failed to JSON encode chain config", "err", err)
 	}
-	if err := db.Put(configKey(hash), data); err != nil {
+	if err := db.Put(19, configKey(hash), data); err != nil {
 		log.Crit("Failed to store chain config", "err", err)
 	}
 }
@@ -111,7 +111,7 @@ const crashesToKeep = 10
 func PushUncleanShutdownMarker(db ethdb.KeyValueStore) ([]uint64, uint64, error) {
 	var uncleanShutdowns crashList
 	// Read old data
-	if data, err := db.Get(uncleanShutdownKey); err == nil {
+	if data, err := db.Get(34, uncleanShutdownKey); err == nil {
 		if err := rlp.DecodeBytes(data, &uncleanShutdowns); err != nil {
 			return nil, 0, err
 		}

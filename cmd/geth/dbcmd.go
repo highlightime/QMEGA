@@ -443,7 +443,7 @@ func dbGet(ctx *cli.Context) error {
 		return err
 	}
 
-	data, err := db.Get(key)
+	data, err := db.Get(1, key)
 	if err != nil {
 		log.Info("Get operation failed", "key", fmt.Sprintf("%#x", key), "error", err)
 		return err

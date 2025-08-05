@@ -63,6 +63,7 @@ func ReadSkeletonHeader(idx int, db ethdb.KeyValueReader, number uint64) *types.
 // WriteSkeletonHeader stores a block header into the skeleton sync store.
 func WriteSkeletonHeader(db ethdb.KeyValueWriter, header *types.Header) {
 	data, err := rlp.EncodeToBytes(header)
+	skeleton_idx := int(header.Number.Uint64())
 	if err != nil {
 		log.Crit("Failed to RLP encode header", "err", err)
 	}

@@ -32,14 +32,14 @@ type Database struct {
 	remote *rpc.Client
 }
 
-func (db *Database) Has(key []byte) (bool, error) {
-	if _, err := db.Get(key); err != nil {
-		return false, err
+func (db *Database) Has(idx int, key []byte) (bool, error) {
+	if _, err := db.Get(idx, key); err != nil {
+		return false, nil
 	}
 	return true, nil
 }
 
-func (db *Database) Get(key []byte) ([]byte, error) {
+func (db *Database) Get(idx int, key []byte) ([]byte, error) {
 	var resp hexutil.Bytes
 	err := db.remote.Call(&resp, "debug_dbGet", hexutil.Bytes(key))
 	if err != nil {
@@ -86,7 +86,7 @@ func (db *Database) ReadAncients(fn func(op ethdb.AncientReaderOp) error) (err e
 	return fn(db)
 }
 
-func (db *Database) Put(key []byte, value []byte) error {
+func (db *Database) Put(idx int, key []byte, value []byte) error {
 	panic("not supported")
 }
 

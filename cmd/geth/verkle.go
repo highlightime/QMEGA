@@ -141,7 +141,7 @@ func verifyVerkle(ctx *cli.Context) error {
 		log.Info("Rebuilding the tree", "root", rootC, "number", headBlock.NumberU64())
 	}
 
-	serializedRoot, err := chaindb.Get(rootC[:])
+	serializedRoot, err := chaindb.Get(68, rootC[:])
 	if err != nil {
 		return err
 	}
@@ -150,7 +150,12 @@ func verifyVerkle(ctx *cli.Context) error {
 		return err
 	}
 
-	if err := checkChildren(root, chaindb.Get); err != nil {
+	// 래퍼 함수 정의
+	verkleNodeResolver := func(key []byte) ([]byte, error) {
+		return chaindb.Get(68, key)
+	}
+
+	if err := checkChildren(root, verkleNodeResolver); err != nil {
 		log.Error("Could not rebuild the tree from the database", "err", err)
 		return err
 	}
@@ -191,7 +196,7 @@ func expandVerkle(ctx *cli.Context) error {
 		return fmt.Errorf("usage: %s root key1 [key 2...]", ctx.App.Name)
 	}
 
-	serializedRoot, err := chaindb.Get(rootC[:])
+	serializedRoot, err := chaindb.Get(68, rootC[:])
 	if err != nil {
 		return err
 	}
@@ -200,9 +205,13 @@ func expandVerkle(ctx *cli.Context) error {
 		return err
 	}
 
+	verkleNodeResolver := func(key []byte) ([]byte, error) {
+		return chaindb.Get(68, key) // idx는 0으로 고정
+	}
+
 	for i, key := range keylist {
 		log.Info("Reading key", "index", i, "key", keylist[0])
-		root.Get(key, chaindb.Get)
+		root.Get(key, verkleNodeResolver)
 	}
 
 	if err := os.WriteFile("dump.dot", []byte(verkle.ToDot(root)), 0600); err != nil {

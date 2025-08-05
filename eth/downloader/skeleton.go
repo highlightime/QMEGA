@@ -350,7 +350,7 @@ func (s *skeleton) sync(head *types.Header) (*types.Header, error) {
 	// If we're continuing a previous merge interrupt, just access the existing
 	// old state without initing from disk.
 	if head == nil {
-		head = rawdb.ReadSkeletonHeader(s.db, s.progress.Subchains[0].Head)
+		head = rawdb.ReadSkeletonHeader(1, s.db, s.progress.Subchains[0].Head)
 	} else {
 		// Otherwise, initialize the sync, trimming and previous leftovers until
 		// we're consistent with the newly requested chain head
@@ -558,7 +558,7 @@ func (s *skeleton) initSync(head *types.Header) {
 			if n := len(s.progress.Subchains); n > 0 {
 				lastchain := s.progress.Subchains[0]
 				if lastchain.Head == headchain.Tail-1 {
-					lasthead := rawdb.ReadSkeletonHeader(s.db, lastchain.Head)
+					lasthead := rawdb.ReadSkeletonHeader(2, s.db, lastchain.Head)
 					if lasthead.Hash() == head.ParentHash {
 						log.Debug("Extended skeleton subchain with new head", "head", headchain.Tail, "tail", lastchain.Tail)
 						lastchain.Head = headchain.Tail
@@ -615,7 +615,7 @@ func (s *skeleton) saveSyncStatus(db ethdb.KeyValueWriter) {
 	if err != nil {
 		panic(err) // This can only fail during implementation
 	}
-	rawdb.WriteSkeletonSyncStatus(db, status)
+	rawdb.WriteSkeletonSyncStatus(db, status, 0)
 }
 
 // processNewHead does the internal shuffling for a new head marker and either
@@ -642,7 +642,7 @@ func (s *skeleton) processNewHead(head *types.Header, final *types.Header) error
 		// If the chain is down to a single beacon header, and it is re-announced
 		// once more, ignore it instead of tearing down sync for a noop.
 		if lastchain.Head == lastchain.Tail {
-			if current := rawdb.ReadSkeletonHeader(s.db, number); current.Hash() == head.Hash() {
+			if current := rawdb.ReadSkeletonHeader(2, s.db, number); current.Hash() == head.Hash() {
 				return nil
 			}
 		}
@@ -652,7 +652,7 @@ func (s *skeleton) processNewHead(head *types.Header, final *types.Header) error
 	if lastchain.Head+1 < number {
 		return fmt.Errorf("%w, head: %d, newHead: %d", errChainGapped, lastchain.Head, number)
 	}
-	if parent := rawdb.ReadSkeletonHeader(s.db, number-1); parent.Hash() != head.ParentHash {
+	if parent := rawdb.ReadSkeletonHeader(3, s.db, number-1); parent.Hash() != head.ParentHash {
 		return fmt.Errorf("%w, ancestor: %d, hash: %s, want: %s", errChainForked, number-1, parent.Hash(), head.ParentHash)
 	}
 	// New header seems to be in the last subchain range. Unwind any extra headers
@@ -1079,7 +1079,7 @@ func (s *skeleton) processResponse(res *headerResponse) (linked bool, merged boo
 			}
 			// If the old subchain is an extension of the new one, merge the two
 			// and let the skeleton syncer restart (to clean internal state)
-			if rawdb.ReadSkeletonHeader(s.db, s.progress.Subchains[1].Head).Hash() == s.progress.Subchains[0].Next {
+			if rawdb.ReadSkeletonHeader(4, s.db, s.progress.Subchains[1].Head).Hash() == s.progress.Subchains[0].Next {
 				log.Debug("Previous subchain merged", "head", head, "tail", tail, "next", next)
 				s.progress.Subchains[0].Tail = s.progress.Subchains[1].Tail
 				s.progress.Subchains[0].Next = s.progress.Subchains[1].Next
@@ -1134,7 +1134,7 @@ func (s *skeleton) cleanStales(filled *types.Header) error {
 	}
 	// If the latest fill was on a different subchain, it means the backfiller
 	// was interrupted before it got to do any meaningful work, no cleanup
-	header := rawdb.ReadSkeletonHeader(s.db, filled.Number.Uint64())
+	header := rawdb.ReadSkeletonHeader(6, s.db, filled.Number.Uint64())
 	if header == nil {
 		log.Debug("Filled header outside of skeleton range", "number", number, "head", s.progress.Subchains[0].Head, "tail", s.progress.Subchains[0].Tail)
 		return nil
@@ -1149,7 +1149,7 @@ func (s *skeleton) cleanStales(filled *types.Header) error {
 	)
 	if number < s.progress.Subchains[0].Head {
 		// The skeleton chain is partially consumed, set the new tail as filled+1.
-		tail := rawdb.ReadSkeletonHeader(s.db, number+1)
+		tail := rawdb.ReadSkeletonHeader(5, s.db, number+1)
 		if tail.ParentHash != filled.Hash() {
 			return fmt.Errorf("filled header is discontinuous with subchain: %d %s, please file an issue", number, filled.Hash())
 		}
@@ -1186,7 +1186,7 @@ func (s *skeleton) cleanStales(filled *types.Header) error {
 			tmpNext := s.progress.Subchains[0].Next
 
 			s.progress.Subchains[0].Tail = n
-			s.progress.Subchains[0].Next = rawdb.ReadSkeletonHeader(s.db, n).ParentHash
+			s.progress.Subchains[0].Next = rawdb.ReadSkeletonHeader(6, s.db, n).ParentHash
 			s.saveSyncStatus(batch)
 
 			if err := batch.Write(); err != nil {
@@ -1230,16 +1230,16 @@ func (s *skeleton) Bounds() (head *types.Header, tail *types.Header, final *type
 	if err := json.Unmarshal(status, progress); err != nil {
 		return nil, nil, nil, err
 	}
-	head = rawdb.ReadSkeletonHeader(s.db, progress.Subchains[0].Head)
+	head = rawdb.ReadSkeletonHeader(9, s.db, progress.Subchains[0].Head)
 	if head == nil {
 		return nil, nil, nil, fmt.Errorf("head skeleton header %d is missing", progress.Subchains[0].Head)
 	}
-	tail = rawdb.ReadSkeletonHeader(s.db, progress.Subchains[0].Tail)
+	tail = rawdb.ReadSkeletonHeader(10, s.db, progress.Subchains[0].Tail)
 	if tail == nil {
 		return nil, nil, nil, fmt.Errorf("tail skeleton header %d is missing", progress.Subchains[0].Tail)
 	}
 	if progress.Finalized != nil && tail.Number.Uint64() <= *progress.Finalized && *progress.Finalized <= head.Number.Uint64() {
-		final = rawdb.ReadSkeletonHeader(s.db, *progress.Finalized)
+		final = rawdb.ReadSkeletonHeader(11, s.db, *progress.Finalized)
 		if final == nil {
 			return nil, nil, nil, fmt.Errorf("finalized skeleton header %d is missing", *progress.Finalized)
 		}
@@ -1254,5 +1254,5 @@ func (s *skeleton) Bounds() (head *types.Header, tail *types.Header, final *type
 // Note, outside the permitted runtimes, this method might return nil results and
 // subsequent calls might return headers from different chains.
 func (s *skeleton) Header(number uint64) *types.Header {
-	return rawdb.ReadSkeletonHeader(s.db, number)
+	return rawdb.ReadSkeletonHeader(12, s.db, number)
 }

@@ -490,7 +490,7 @@ type cleaner struct {
 // removed from the dirty cache and moved into the clean cache. The reason behind
 // the two-phase commit is to ensure data availability while moving from memory
 // to disk.
-func (c *cleaner) Put(key []byte, rlp []byte) error {
+func (c *cleaner) Put(idx int, key []byte, rlp []byte) error {
 	hash := common.BytesToHash(key)
 
 	// If the node does not exist, we're done on this path

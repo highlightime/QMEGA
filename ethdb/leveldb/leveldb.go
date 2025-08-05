@@ -14,8 +14,8 @@
 // You should have received a copy of the GNU Lesser General Public License
 // along with the go-ethereum library. If not, see <http://www.gnu.org/licenses/>.
 
-//go:build !js && !wasip1
-// +build !js,!wasip1
+//go:build !js
+// +build !js
 
 // Package leveldb implements the key-value database layer based on LevelDB.
 package leveldb
@@ -99,6 +99,7 @@ func New(file string, cache int, handles int, namespace string, readonly bool) (
 		options.OpenFilesCacheCapacity = handles
 		options.BlockCacheCapacity = cache / 2 * opt.MiB
 		options.WriteBuffer = cache / 4 * opt.MiB // Two of these are used internally
+		// options.NoSync = true
 		if readonly {
 			options.ReadOnly = true
 		}
@@ -184,12 +185,12 @@ func (db *Database) Close() error {
 }
 
 // Has retrieves if a key is present in the key-value store.
-func (db *Database) Has(key []byte) (bool, error) {
+func (db *Database) Has(idx int, key []byte) (bool, error) {
 	return db.db.Has(key, nil)
 }
 
 // Get retrieves the given key if it's present in the key-value store.
-func (db *Database) Get(key []byte) ([]byte, error) {
+func (db *Database) Get(idx int, key []byte) ([]byte, error) {
 	dat, err := db.db.Get(key, nil)
 	if err != nil {
 		return nil, err
@@ -198,7 +199,7 @@ func (db *Database) Get(key []byte) ([]byte, error) {
 }
 
 // Put inserts the given value into the key-value store.
-func (db *Database) Put(key []byte, value []byte) error {
+func (db *Database) Put(idx int, key []byte, value []byte) error {
 	return db.db.Put(key, value, nil)
 }
 
@@ -366,17 +367,29 @@ func (db *Database) meter(refresh time.Duration, namespace string) {
 		compactions[i%2][2] = stats.LevelRead.Sum()
 		compactions[i%2][3] = stats.LevelWrite.Sum()
 		// Update all the requested meters
-		db.diskSizeGauge.Update(compactions[i%2][0])
-		db.compTimeMeter.Mark(compactions[i%2][1] - compactions[(i-1)%2][1])
-		db.compReadMeter.Mark(compactions[i%2][2] - compactions[(i-1)%2][2])
-		db.compWriteMeter.Mark(compactions[i%2][3] - compactions[(i-1)%2][3])
+		if db.diskSizeGauge != nil {
+			db.diskSizeGauge.Update(compactions[i%2][0])
+		}
+		if db.compTimeMeter != nil {
+			db.compTimeMeter.Mark(compactions[i%2][1] - compactions[(i-1)%2][1])
+		}
+		if db.compReadMeter != nil {
+			db.compReadMeter.Mark(compactions[i%2][2] - compactions[(i-1)%2][2])
+		}
+		if db.compWriteMeter != nil {
+			db.compWriteMeter.Mark(compactions[i%2][3] - compactions[(i-1)%2][3])
+		}
 		var (
 			delayN   = int64(stats.WriteDelayCount)
 			duration = stats.WriteDelayDuration
 			paused   = stats.WritePaused
 		)
-		db.writeDelayNMeter.Mark(delayN - delaystats[0])
-		db.writeDelayMeter.Mark(duration.Nanoseconds() - delaystats[1])
+		if db.writeDelayNMeter != nil {
+			db.writeDelayNMeter.Mark(delayN - delaystats[0])
+		}
+		if db.writeDelayMeter != nil {
+			db.writeDelayMeter.Mark(duration.Nanoseconds() - delaystats[1])
+		}
 		// If a warning that db is performing compaction has been displayed, any subsequent
 		// warnings will be withheld for one minute not to overwhelm the user.
 		if paused && delayN-delaystats[0] == 0 && duration.Nanoseconds()-delaystats[1] == 0 &&
@@ -390,8 +403,12 @@ func (db *Database) meter(refresh time.Duration, namespace string) {
 			nRead  = int64(stats.IORead)
 			nWrite = int64(stats.IOWrite)
 		)
-		db.diskReadMeter.Mark(nRead - iostats[0])
-		db.diskWriteMeter.Mark(nWrite - iostats[1])
+		if db.diskReadMeter != nil {
+			db.diskReadMeter.Mark(nRead - iostats[0])
+		}
+		if db.diskWriteMeter != nil {
+			db.diskWriteMeter.Mark(nWrite - iostats[1])
+		}
 		iostats[0], iostats[1] = nRead, nWrite
 
 		db.memCompGauge.Update(int64(stats.MemComp))
@@ -432,7 +449,7 @@ type batch struct {
 }
 
 // Put inserts the given value into the batch for later committing.
-func (b *batch) Put(key, value []byte) error {
+func (b *batch) Put(idx int, key, value []byte) error {
 	b.b.Put(key, value)
 	b.size += len(key) + len(value)
 	return nil
@@ -452,7 +469,12 @@ func (b *batch) ValueSize() int {
 
 // Write flushes any accumulated data to disk.
 func (b *batch) Write() error {
-	return b.db.Write(b.b, nil)
+	opt := &opt.WriteOptions{}
+	// opt.NoWriteMerge = false
+	opt.Sync = true
+
+	return b.db.Write(b.b, opt)
+	// return b.db.Write(b.b, nil)
 }
 
 // Reset resets the batch for reuse.
@@ -478,7 +500,7 @@ func (r *replayer) Put(key, value []byte) {
 	if r.failure != nil {
 		return
 	}
-	r.failure = r.writer.Put(key, value)
+	r.failure = r.writer.Put(0, key, value)
 }
 
 // Delete removes the key from the key-value data store.
@@ -497,4 +519,27 @@ func bytesPrefixRange(prefix, start []byte) *util.Range {
 	r := util.BytesPrefix(prefix)
 	r.Start = append(r.Start, start...)
 	return r
+}
+
+// snapshot wraps a leveldb snapshot for implementing the Snapshot interface.
+type snapshot struct {
+	db *leveldb.Snapshot
+}
+
+// Has retrieves if a key is present in the snapshot backing by a key-value
+// data store.
+func (snap *snapshot) Has(idx int, key []byte) (bool, error) {
+	return snap.db.Has(key, nil)
+}
+
+// Get retrieves the given key if it's present in the snapshot backing by
+// key-value data store.
+func (snap *snapshot) Get(idx int, key []byte) ([]byte, error) {
+	return snap.db.Get(key, nil)
+}
+
+// Release releases associated resources. Release should always succeed and can
+// be called multiple times without causing error.
+func (snap *snapshot) Release() {
+	snap.db.Release()
 }

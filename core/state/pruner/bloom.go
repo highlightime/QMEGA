@@ -98,7 +98,7 @@ func (bloom *stateBloom) Commit(filename, tempname string) error {
 }
 
 // Put implements the KeyValueWriter interface. But here only the key is needed.
-func (bloom *stateBloom) Put(key []byte, value []byte) error {
+func (bloom *stateBloom) Put(idx int, key []byte, value []byte) error {
 	// If the key length is not 32bytes, ensure it's contract code
 	// entry with new scheme.
 	if len(key) != common.HashLength {

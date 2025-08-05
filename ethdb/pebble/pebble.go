@@ -22,6 +22,7 @@ import (
 	"encoding/binary"
 	"encoding/csv"
 	"fmt"
+	"os"
 	"runtime"
 	"strconv"
 	"sync"
@@ -34,6 +35,7 @@ import (
 	"github.com/ethereum/go-ethereum/ethdb"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/metrics"
+	lru "github.com/hashicorp/golang-lru"
 )
 
 const (
@@ -74,8 +76,9 @@ type IndexStats struct {
 // Apart from basic data storage functionality it also supports batch writes and
 // iterating over the keyspace in binary-alphabetical order.
 type Database struct {
-	fn string     // filename for reporting
-	db *pebble.DB // Underlying pebble storage engine
+	fn     string     // filename for reporting
+	dbHot  *pebble.DB // Underlying pebble storage engine
+	dbCold *pebble.DB
 
 	compTimeMeter       *metrics.Meter // Meter for measuring the total time spent in database compaction
 	compReadMeter       *metrics.Meter // Meter for measuring the data read during compaction
@@ -679,6 +682,17 @@ func (d *Database) Delete(key []byte) error {
 	return d.dbHot.Delete(key, nil)
 }
 
+// DeleteRange deletes all of the keys (and values) in the range [start,end)
+// (inclusive on start, exclusive on end).
+func (d *Database) DeleteRange(start, end []byte) error {
+	d.quitLock.RLock()
+	defer d.quitLock.RUnlock()
+	if d.closed {
+		return pebble.ErrClosed
+	}
+	return d.dbHot.DeleteRange(start, end, d.writeOptions)
+}
+
 // NewBatch creates a write-only key-value store that buffers changes to its host
 // database until a final write is called.
 func (d *Database) NewBatch() ethdb.Batch {
@@ -700,17 +714,6 @@ func (d *Database) NewBatchWithSize(size int) ethdb.Batch {
 type snapshot struct {
 	dbHot  *pebble.Snapshot
 	dbCold *pebble.Snapshot
-}
-
-// NewSnapshot creates a database snapshot based on the current state.
-// The created snapshot will not be affected by all following mutations
-// happened on the database.
-// Note don't forget to release the snapshot once it's used up, otherwise
-// the stale data will never be cleaned up by the underlying compactor.
-func (d *Database) NewSnapshot() (ethdb.Snapshot, error) {
-	snapHot := d.dbHot.NewSnapshot()
-	snapCold := d.dbCold.NewSnapshot()
-	return &snapshot{dbHot: snapHot, dbCold: snapCold}, nil
 }
 
 // Has retrieves if a key is present in the snapshot backing by a key-value
@@ -758,11 +761,12 @@ func (snap *snapshot) Get(idx int, key []byte) ([]byte, error) {
 // batch is a write-only batch that commits changes to its host database
 // when Write is called. A batch cannot be used concurrently.
 type batch struct {
-	b       *pebble.Batch
-	db      *Database
-	putkeys []*ARYFORMIG
-	skkeys  []*ARYFORSK
-	size    int
+	b        *pebble.Batch
+	db       *Database
+	putkeys  []*ARYFORMIG
+	skkeys   []*ARYFORSK
+	statkeys []*ARYFORSK
+	size     int
 }
 
 type ARYFORSK struct {
@@ -783,6 +787,7 @@ type ARYFORMIG struct {
 
 // Put inserts the given value into the batch for later committing.
 func (b *batch) Put(idx int, key, value []byte) error {
+	b.statkeys = append(b.statkeys, &ARYFORSK{key: &key, value: &value, idx: idx})
 	if isPutColdDB(idx) {
 		b.putkeys = append(b.putkeys, &ARYFORMIG{key: &key, value: &value})
 	}
@@ -793,17 +798,6 @@ func (b *batch) Put(idx int, key, value []byte) error {
 	b.b.Set(key, value, nil)
 	SizeKV := len(key) + len(value)
 	b.size += SizeKV
-	statIdx := idx % 100
-	b.db.statLock.RLock()
-	defer b.db.statLock.RUnlock()
-	stat, exists := b.db.stats[statIdx]
-	if !exists {
-		stat = &IndexStats{}
-		b.db.stats[statIdx] = stat
-	}
-	stat.PutCount++
-	stat.LastPut = time.Now().Unix()
-	stat.TotalSize += int64(SizeKV)
 	return nil
 }
 
@@ -815,20 +809,37 @@ func (b *batch) Write() error {
 		return pebble.ErrClosed
 	}
 	res := b.b.Commit(b.db.writeOptions)
+
 	if len(b.putkeys) > 0 {
 		b.db.migrationChan <- &b.putkeys
 	}
 
 	if len(b.skkeys) > 0 {
 		for _, putkey := range b.skkeys {
-			idx := putkey.idx
-			skeletonIdx := idx / 100
-			if idx%100 == 37 {
+			idx := int(putkey.idx % 100)
+			skeletonIdx := putkey.idx / 100
+			if idx == 62 {
 				old_finalized := b.db.skeletonFinalized.Load()
 				if old_finalized < int64(skeletonIdx) && b.db.skeletonFinalized.CompareAndSwap(old_finalized, int64(skeletonIdx)) {
 					b.db.skeletonMigChan <- int(skeletonIdx) - 1000
 				}
 			}
+		}
+	}
+
+	if len(b.statkeys) > 0 {
+		for _, statkey := range b.statkeys {
+			statIdx := int(statkey.idx % 100)
+			b.db.statLock.Lock()
+			stat, exists := b.db.stats[statIdx]
+			if !exists {
+				stat = &IndexStats{}
+				b.db.stats[statIdx] = stat
+			}
+			stat.PutCount++
+			stat.LastPut = time.Now().Unix()
+			stat.TotalSize += int64(b.size)
+			b.db.statLock.Unlock()
 		}
 	}
 
@@ -1021,10 +1032,8 @@ func upperBound(prefix []byte) (limit []byte) {
 }
 
 // Stat returns the internal metrics of Pebble in a text format. It's a developer
-// method to read everything there is to read independent of Pebble version.
-//
-// The property is unused in Pebble as there's only one thing to retrieve.
-func (d *Database) Stat(property string) (string, error) {
+// method to read everything there is to read, independent of Pebble version.
+func (d *Database) Stat() (string, error) {
 	return d.dbHot.Metrics().String(), nil
 }
 
@@ -1213,61 +1222,29 @@ func (l panicLogger) Fatalf(format string, args ...interface{}) {
 	panic(fmt.Errorf("fatal: "+format, args...))
 }
 
+var skeletonIdx = []int{61, 62}
+var trieIdx = []int{40, 50, 51, 52}
+var snapshotIdx = []int{4, 20, 21, 22, 23, 24, 25, 26, 27}
+
 func isPutFile(idx int) bool {
-	var skeletonIdx = []int{61, 62}
 	for _, i := range skeletonIdx {
 		if i == idx%100 {
 			return true
 		}
 	}
-	errc <- nil
+	return false
 }
 
-func isPutColdDB(idx int) bool {
-	var trieIdx = []int{50, 51, 52}
-	var snapshotIdx = []int{20, 21, 22, 23, 24, 25, 26, 37}
-	for _, i := range trieIdx {
-		if i == idx {
+func isGetFile(idx int) bool {
+	for _, i := range skeletonIdx {
+		if i == idx%100 && idx/100 != 1 {
 			return true
 		}
 	}
+	return false
 }
 
-// pebbleIterator is a wrapper of underlying iterator in storage engine.
-// The purpose of this structure is to implement the missing APIs.
-//
-// The pebble iterator is not thread-safe.
-type pebbleIterator struct {
-	iter     *pebble.Iterator
-	moved    bool
-	released bool
-}
-
-// NewIterator creates a binary-alphabetical iterator over a subset
-// of database content with a particular key prefix, starting at a particular
-// initial key (or after, if it does not exist).
-func (d *Database) NewIterator(prefix []byte, start []byte) ethdb.Iterator {
-	iter, _ := d.db.NewIter(&pebble.IterOptions{
-		LowerBound: append(prefix, start...),
-		UpperBound: upperBound(prefix),
-	})
-	iter.First()
-	return &pebbleIterator{iter: iter, moved: true, released: false}
-}
-
-// Next moves the iterator to the next key/value pair. It returns whether the
-// iterator is exhausted.
-func (iter *pebbleIterator) Next() bool {
-	if iter.moved {
-		iter.moved = false
-		return iter.iter.Valid()
-	}
-	return iter.iter.Next()
-}
-
-func isGetColdDB(idx int) bool {
-	var trieIdx = []int{50, 51, 52}
-	var snapshotIdx = []int{20, 21, 22, 23, 24, 25, 26, 37}
+func isPutColdDB(idx int) bool {
 	for _, i := range trieIdx {
 		if i == idx {
 			return true
@@ -1281,10 +1258,14 @@ func isGetColdDB(idx int) bool {
 	return false
 }
 
-func isGetFile(idx int) bool {
-	var skeletonIdx = []int{62}
-	for _, i := range skeletonIdx {
-		if i == idx%100 && idx/100 != 1 {
+func isGetColdDB(idx int) bool {
+	for _, i := range trieIdx {
+		if i == idx {
+			return true
+		}
+	}
+	for _, i := range snapshotIdx {
+		if i == idx {
 			return true
 		}
 	}
@@ -1292,7 +1273,6 @@ func isGetFile(idx int) bool {
 }
 
 func isHasHDD(idx int) bool {
-	var trieIdx = []int{50, 51, 52}
 	for _, i := range trieIdx {
 		if i == idx {
 			return true
